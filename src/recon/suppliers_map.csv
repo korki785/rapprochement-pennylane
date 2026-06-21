@@ -1,0 +1,11 @@
+# Mapping fournisseur -> où récupérer la facture.
+# `pattern` est comparé (en fuzzy) au libellé normalisé de la transaction bancaire.
+# `source` : email = arrive déjà par mail (filtre Gmail) | portal = à télécharger sur le portail | manual = autre.
+# `url` : lien direct vers la page de facturation (laisser vide si inconnu).
+pattern,source,url,note
+NOTION,portal,https://www.notion.so/my-integrations,Pas d'email de facture. Settings > Billing > View invoice.
+KANDBAZ,portal,https://app.kandbaz.fr,Domiciliation. Vérifier si un billing email est configurable.
+QONTO,email,https://app.qonto.com,Factures de commissions bancaires - non synchronisées par la connexion Qonto.
+STRIPE,email,,Activer les email receipts côté marchand pour que la facture arrive dans Gmail.
+GOOGLE,email,https://payments.google.com,Google Workspace / Cloud - factures par email activables.
+OVH,email,https://www.ovh.com/manager,Factures envoyées par email.

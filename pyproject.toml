@@ -1,0 +1,24 @@
+[project]
+name = "reconciliation-pennylane"
+version = "0.1.0"
+description = "Automatisation du rapprochement bancaire Qonto -> Pennylane (détection des dépenses sans justificatif, import et matching de factures)."
+requires-python = ">=3.9"
+# Cœur volontairement SANS dépendance : tout tourne avec la stdlib (urllib, json, csv,
+# difflib). `python3 scripts/backlog_report.py` fonctionne sans `pip install`.
+dependencies = []
+
+[project.optional-dependencies]
+# Optionnel : améliore la qualité du regroupement fuzzy (sinon fallback difflib).
+fuzzy = ["rapidfuzz>=3.0"]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
