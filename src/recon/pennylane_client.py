@@ -181,3 +181,26 @@ class PennylaneClient:
         return self._request("POST", "/supplier_invoices/import",
                              body=json.dumps(payload).encode("utf-8"),
                              content_type="application/json")
+
+
+def build_invoice_payload(file_attachment_id, txn, amount_foreign: Optional[float] = None) -> Dict:
+    """Construit le payload d'import en gérant le multi-devises.
+
+    `txn` est une `transactions.UnmatchedTransaction`. Pour une transaction réglée
+    dans une devise étrangère (ex. USD facturé, EUR débité), on transmet la devise
+    d'origine + le taux de change réel calculé depuis Qonto, ce qui permet à
+    Pennylane de rapprocher la facture USD avec la transaction EUR.
+
+    `amount_foreign` : montant de la facture dans sa devise d'origine (extrait de
+    l'email/PDF). Si omis, on retombe sur `txn.local_amount` (montant Qonto).
+    """
+    payload: Dict = {
+        "file_attachment_id": file_attachment_id,
+        "transaction_reference": txn.id,
+    }
+    if txn.is_foreign_currency:
+        amount = amount_foreign if amount_foreign is not None else abs(txn.local_amount)
+        payload["currency"] = txn.local_currency.upper()
+        payload["amount"] = round(abs(amount), 2)
+        payload["exchange_rate"] = round(txn.exchange_rate, 6)
+    return payload

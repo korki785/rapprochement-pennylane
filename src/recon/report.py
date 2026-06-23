@@ -83,10 +83,14 @@ def render_markdown(lines: List[SupplierLine]) -> str:
         if l.note:
             out.append(f"> {l.note}")
         out.append("")
-        out.append("| Date | Montant | Libellé | ID transaction |")
-        out.append("|---|---:|---|---|")
+        out.append("| Date | Montant | Devise d'origine | Libellé | ID transaction |")
+        out.append("|---|---:|---|---|---|")
         for t in l.transactions:
-            out.append(f"| {t.date} | {t.amount:.2f} {t.currency} | {t.label} | {t.id} |")
+            if t.is_foreign_currency:
+                origin = f"{t.local_amount:.2f} {t.local_currency} @ {t.exchange_rate:.4f}"
+            else:
+                origin = "—"
+            out.append(f"| {t.date} | {t.amount:.2f} {t.currency} | {origin} | {t.label} | {t.id} |")
     return "\n".join(out)
 
 

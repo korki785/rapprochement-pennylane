@@ -17,13 +17,32 @@ class UnmatchedTransaction:
     id: str
     date: str
     label: str
-    amount: float          # négatif = dépense (sortie), positif = encaissement
-    currency: str
+    amount: float          # négatif = dépense (sortie), positif = encaissement ; en `currency`
+    currency: str          # devise de règlement du compte (typiquement EUR)
     is_expense: bool
+    local_amount: float = 0.0      # montant dans la devise d'origine (ce que le marchand a facturé)
+    local_currency: str = ""       # devise d'origine : "USD", "GBP"… ("" = inconnue)
 
     @property
     def abs_amount(self) -> float:
         return abs(self.amount)
+
+    @property
+    def is_foreign_currency(self) -> bool:
+        """Vrai si la transaction a été facturée dans une devise ≠ devise du compte."""
+        lc = self.local_currency.upper()
+        return bool(lc) and lc != self.currency.upper()
+
+    @property
+    def exchange_rate(self) -> float:
+        """Taux réel `currency`/`local_currency` calculé depuis les montants Qonto.
+
+        Ex : amount=-299.68 EUR pour local_amount=-314.40 USD -> 0.9532 (EUR par USD).
+        Renvoie 1.0 si pas de devise étrangère ou données manquantes.
+        """
+        if self.is_foreign_currency and self.local_amount:
+            return abs(self.amount) / abs(self.local_amount)
+        return 1.0
 
 
 def _to_float(value) -> float:
@@ -31,6 +50,19 @@ def _to_float(value) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+# Clés possibles selon la source (Qonto vs Pennylane v2) pour le montant/devise d'origine.
+_LOCAL_AMOUNT_KEYS = ("local_amount", "currency_amount", "original_amount", "amount_currency")
+_LOCAL_CURRENCY_KEYS = ("local_currency", "currency_amount_currency", "original_currency")
+
+
+def _first_present(t: dict, keys) -> Optional[str]:
+    for k in keys:
+        v = t.get(k)
+        if v not in (None, ""):
+            return v
+    return None
 
 
 def find_unmatched(
@@ -55,14 +87,19 @@ def find_unmatched(
             if t is None:
                 continue
             amount = _to_float(t.get("amount"))
+            currency = str(t.get("currency") or "EUR")
+            local_amount = _to_float(_first_present(t, _LOCAL_AMOUNT_KEYS))
+            local_currency = str(_first_present(t, _LOCAL_CURRENCY_KEYS) or "")
             results.append(
                 UnmatchedTransaction(
                     id=str(t.get("id")),
                     date=str(t.get("date") or ""),
                     label=str(t.get("label") or ""),
                     amount=amount,
-                    currency=str(t.get("currency") or "EUR"),
+                    currency=currency,
                     is_expense=amount < 0,
+                    local_amount=local_amount,
+                    local_currency=local_currency,
                 )
             )
     results.sort(key=lambda x: (x.date, x.label))
