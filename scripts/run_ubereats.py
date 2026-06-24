@@ -51,9 +51,9 @@ def main() -> int:
     transfers_path = out_dir / "qonto_transfers.json"
     matches_path = out_dir / "matches.json"
 
-    # --- 1. Télécharger les factures du portail UberEats ----------------------
+    # --- 1. Télécharger les reçus PDF UberEats depuis Gmail perso ---------------
     fetch_cmd = [
-        str(SCRIPTS / "fetch_ubereats_invoices.py"),
+        str(SCRIPTS / "fetch_ubereats_gmail.py"),
         "--out-dir", str(input_dir),
         "--since", args.since,
     ]
@@ -61,7 +61,7 @@ def main() -> int:
         fetch_cmd.append("--headed")
     if args.dry_run:
         fetch_cmd.append("--dry-run")
-    _run(fetch_cmd, "1/4 Téléchargement des factures UberEats")
+    _run(fetch_cmd, "1/4 Téléchargement des reçus UberEats (Gmail)")
 
     # --- 2. Récupérer les virements de remboursement Qonto --------------------
     print("\n=== 2/4 Virements Qonto ===", file=sys.stderr)

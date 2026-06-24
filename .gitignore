@@ -9,4 +9,7 @@ build/
 dist/
 reports/
 .ubereats_session.json
+.ubereats_gmail_session.json
+gmail_token.json
+gmail_credentials.json
 *.local

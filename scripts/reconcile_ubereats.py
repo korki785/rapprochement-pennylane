@@ -93,10 +93,22 @@ def scan_input_dir(input_dir: Path) -> List[Path]:
     return sorted(input_dir.glob("*.pdf"))
 
 
+def _pdftotext_bin() -> Optional[str]:
+    """Cherche pdftotext dans PATH et chemins Homebrew connus."""
+    found = shutil.which("pdftotext")
+    if found:
+        return found
+    for candidate in ["/opt/homebrew/bin/pdftotext", "/usr/local/bin/pdftotext"]:
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
 def _run_pdftotext(path: Path) -> str:
     """Extrait le texte d'un PDF via `pdftotext -layout` (poppler)."""
+    bin_path = _pdftotext_bin() or "pdftotext"
     proc = subprocess.run(
-        ["pdftotext", "-layout", str(path), "-"],
+        [bin_path, "-layout", str(path), "-"],
         capture_output=True, text=True, encoding="utf-8",
     )
     if proc.returncode != 0:
@@ -125,15 +137,40 @@ def _parse_date(text: str) -> str:
 
 
 def _parse_amount(text: str) -> float:
-    """Renvoie le total TTC en EUR, sinon 0.0."""
-    m = re.search(r"(?:total[^\n\d]*)(\d{1,6}[.,]\d{2})\s*(?:€|EUR)", text, re.IGNORECASE)
-    if not m:
-        # Repli : tout montant suivi de € ou EUR (le plus grand l'emporte).
-        cands = re.findall(r"(\d{1,6}[.,]\d{2})\s*(?:€|EUR)", text)
-        if not cands:
-            return 0.0
-        return max(float(c.replace(",", ".")) for c in cands)
-    return float(m.group(1).replace(",", "."))
+    """Renvoie le total TTC en EUR depuis un reçu UberEats, sinon 0.0.
+
+    Les PDFs UberEats contiennent toute la page commandes (liste + modal reçu).
+    Stratégie : chercher le montant près de l'info de paiement (carte bancaire),
+    qui correspond au vrai total payé.
+    """
+    # 1. Montant près du libellé de paiement (Mastercard, Visa, carte…).
+    m = re.search(
+        r"(?:Mastercard|Visa|Carte|carte|Paiements?|payment)[^\d\n]{0,40}(\d{1,4}[.,]\d{2})\s*€",
+        text, re.IGNORECASE
+    )
+    if m:
+        return float(m.group(1).replace(",", "."))
+
+    # 2. Montant après "Total" suivi du nom du resto ou d'un saut de ligne.
+    m = re.search(r"Total\s*\n\s*(\d{1,4}[.,]\d{2})\s*€", text, re.IGNORECASE)
+    if m:
+        return float(m.group(1).replace(",", "."))
+
+    # 3. Montant qui apparaît au moins deux fois (total = confirmation paiement).
+    cands = re.findall(r"(\d{1,4}[.,]\d{2})\s*€", text)
+    if cands:
+        from collections import Counter
+        counts = Counter(cands)
+        repeated = [c for c, n in counts.items() if n >= 2]
+        if repeated:
+            return max(float(c.replace(",", ".")) for c in repeated)
+        # Repli : plus petit montant supérieur à 5€ (exclut frais de livraison isolés).
+        values = sorted(set(float(c.replace(",", ".")) for c in cands))
+        plausible = [v for v in values if v > 5.0]
+        if plausible:
+            # Prendre la médiane pour éviter les grosses sommes parasites.
+            return plausible[len(plausible) // 2]
+    return 0.0
 
 
 def _parse_invoice_id(text: str, fallback: str) -> str:
@@ -189,13 +226,13 @@ def load_invoices(input_dir: Path) -> List[UberEatsInvoice]:
     manifest_path = input_dir.parent / "manifest.csv"
     if manifest_path.exists():
         return _load_manifest(input_dir)
-    if shutil.which("pdftotext"):
-        pdfs = scan_input_dir(input_dir)
-        if pdfs:
-            return [parse_invoice(p) for p in pdfs]
+    pdfs = scan_input_dir(input_dir)
+    if pdfs and _pdftotext_bin():
+        return [parse_invoice(p) for p in pdfs]
+    if not pdfs:
+        raise SystemExit("Aucune facture UberEats trouvée dans le dossier input.")
     raise SystemExit(
-        "Aucun manifest.csv et pdftotext introuvable (ou dossier vide). "
-        "Lancer fetch_ubereats_invoices.py d'abord."
+        "pdftotext introuvable. Installer : brew install poppler"
     )
 
 
