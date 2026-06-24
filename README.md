@@ -64,14 +64,31 @@ pip3 install playwright && python3 -m playwright install chromium
 brew install poppler   # pour pdftotext
 
 # Remplir .env (voir .env.example) :
-# UBEREATS_GMAIL=...  UBEREATS_GMAIL_PASSWORD=...
-# QONTO_ORGANIZATION_SLUG=...  QONTO_SECRET_KEY=...
+# UBEREATS_GMAIL=naelkodmani@gmail.com
+# UBEREATS_GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx   ← myaccount.google.com/security → Mots de passe des applications
+# QONTO_ORGANIZATION_SLUG=...
+# QONTO_SECRET_KEY=...
 
 # Flux complet
-python3 scripts/run_ubereats.py --headed --since 2026-04-01
+python3 scripts/run_ubereats.py --since 2026-04-01
 ```
 
-Premier lancement : `--headed` requis pour la connexion manuelle à Gmail perso (session sauvegardée ensuite dans `.ubereats_gmail_session.json`).
+### Automatisation hebdomadaire (launchd)
+
+Le script tourne automatiquement chaque **lundi à 9h** via launchd macOS :
+
+```bash
+# Activer (une seule fois)
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.ubereats-recon.plist
+
+# Vérifier
+launchctl list | grep ubereats
+
+# Log de chaque exécution
+cat reports/ubereats/weekly_run.log
+```
+
+Le plist est dans `~/Library/LaunchAgents/com.maisondarwish.ubereats-recon.plist`.
 
 ### Scripts
 
