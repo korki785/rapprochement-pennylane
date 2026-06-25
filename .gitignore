@@ -12,4 +12,6 @@ reports/
 .ubereats_gmail_session.json
 gmail_token.json
 gmail_credentials.json
+credentials.json
+token.json
 *.local

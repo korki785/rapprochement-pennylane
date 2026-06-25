@@ -13,6 +13,12 @@ fuzzy = ["rapidfuzz>=3.0"]
 # Optionnel : automatisation du portail UberEats (téléchargement des factures).
 # Installer le navigateur après : playwright install chromium
 portal = ["playwright>=1.40"]
+# Optionnel : rapprochement factures fournisseurs depuis Google Drive.
+drive = [
+    "google-api-python-client>=2.100",
+    "google-auth-oauthlib>=1.1",
+    "google-auth-httplib2>=0.2",
+]
 dev = ["pytest>=8.0"]
 
 [build-system]

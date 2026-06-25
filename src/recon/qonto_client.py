@@ -161,7 +161,50 @@ class QontoClient:
                 })
         return out
 
+    def fetch_all_debits(
+        self, since: str, operation_types: Optional[List[str]] = None,
+    ) -> List[Dict]:
+        """Tous les débits depuis `since`, toutes opérations confondues.
+
+        Contrairement à fetch_reimbursement_transfers (filtré sur le libellé),
+        renvoie tous les débits avec les champs nécessaires au rapprochement
+        fournisseurs, dont local_amount / local_currency pour les paiements en
+        devise étrangère.
+
+        `operation_types` : filtre optionnel, ex. ["card", "transfer"]. None = tout.
+        """
+        out: List[Dict] = []
+        for acct in self.list_bank_account_ids():
+            for tx in self.iter_transactions(acct):
+                if tx.get("side") != "debit":
+                    continue
+                settled = str(tx.get("settled_at") or tx.get("emitted_at") or "")[:10]
+                if settled and settled < since:
+                    continue
+                op_type = str(tx.get("operation_type") or "")
+                if operation_types and op_type not in operation_types:
+                    continue
+                out.append({
+                    "id": str(tx.get("id") or tx.get("transaction_id") or ""),
+                    "label": str(tx.get("label") or ""),
+                    "amount": tx.get("amount"),
+                    "currency": tx.get("currency") or "EUR",
+                    "local_amount": tx.get("local_amount"),
+                    "local_currency": tx.get("local_currency") or "",
+                    "settled_at": settled,
+                    "operation_type": op_type,
+                })
+        return out
+
     # -- Pièces jointes -----------------------------------------------------
+    def get_transaction_attachments(self, transaction_id: str) -> List[Dict]:
+        """Liste les pièces jointes d'une transaction (vide si aucune).
+
+        Permet d'éviter d'attacher un PDF déjà présent.
+        """
+        data = self.get(f"/transactions/{transaction_id}/attachments")
+        return data.get("attachments", [])
+
     def upload_attachment(self, transaction_id: str, pdf_path: Path) -> Dict:
         """Attache un PDF à une transaction (POST .../attachments, multipart).
 
