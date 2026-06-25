@@ -115,10 +115,13 @@ Les factures d'achat sont stockées dans le Drive « Factures fournisseurs ». C
 
 1. **Drive** — télécharge les PDF non encore traités (`processed.json`) → `reports/fournisseurs/input/`
 2. **Qonto** — `QontoClient.fetch_all_debits` → `qonto_debits.json` (avec `local_amount`/`local_currency`)
-3. **Rapprocher** — `reconcile_fournisseurs.py` : 3 stratégies → `matches.json` + rapport `.md`
+3. **Rapprocher** — `reconcile_fournisseurs.py` : OCR (reçus scannés) + 4 stratégies → `matches.json` + rapport `.md`
    - **EUR carte** : montant ± 0,01 €, date ± 7 j
    - **EUR virement perso** : `operation_type=transfer` + libellé « Nael »/« Darwish »
-   - **Devise** : pas de conversion — match sur `local_currency` + `local_amount` (ex. facture USD ↔ tx Qonto `local_currency=USD`)
+   - **Devise carte Qonto** : pas de conversion — match sur `local_currency` + `local_amount` (ex. facture USD ↔ tx Qonto `local_currency=USD`)
+   - **Devise payée perso → remboursée EUR** (passe 3, `foreign_perso`) : reçu en devise (ex. hôtel NOK) payé carte perso, remboursé par virement EUR. Le virement ne peut précéder la dépense ; on prend le plus proche (même jour = signal fort) dont le taux FX implicite est plausible. Marqué `warn` → **confirmation manuelle** (non auto-attaché).
+
+Montant retenu = **plus grand montant du reçu** (= total débité, pourboire inclus). OCR via Apple Vision (`scripts/ocr/`), cache dans `reports/fournisseurs/.ocr_cache/`. Seuls les rapprochements `exact` sont attachés automatiquement.
 4. **Attacher** — `upload_attachment` (skip si la transaction a déjà une PJ)
 5. **Marquer** — inscrit les Drive file IDs rapprochés dans `processed.json`
 

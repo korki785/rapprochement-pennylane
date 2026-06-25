@@ -5,11 +5,16 @@ Pour chaque facture PDF téléchargée depuis le Drive « Factures fournisseurs 
 ce script trouve la transaction Qonto correspondante et produit `matches.json`
 (consommé par run_fournisseurs.py pour attacher les PDF) + un rapport markdown.
 
-Trois stratégies de rapprochement :
-  - EUR / carte    : débit carte en EUR, montant ± 0,01 €, date ± 7 j.
-  - EUR / virement : virement perso « Nael Darwish » (facture payée perso, remboursée).
-  - Devise         : paiement carte en devise étrangère. Pas de conversion :
-                     Qonto stocke local_amount + local_currency ; on matche dessus.
+Les factures sont souvent des reçus SCANNÉS (image, sans couche texte) :
+pdftotext renvoie vide -> repli OCR via Vision macOS (scripts/ocr/ocrbin).
+
+Montant retenu = le plus grand montant du reçu = total réellement débité
+(« Total Tender » / « CARTE BANCAIRE » / TTC, pourboire inclus). Le « Total »
+hors pourboire ne correspond pas au débit Qonto.
+
+Rapprochement agnostique à la devise : le montant débité est comparé à la fois
+au montant EUR (`amount`) et au montant en devise d'origine (`local_amount`) de
+chaque transaction Qonto. Inutile de convertir : Qonto stocke déjà les deux.
 
 Usage :
     python3 scripts/reconcile_fournisseurs.py \\
@@ -18,8 +23,8 @@ Usage :
         --out-dir      reports/fournisseurs \\
         [--since YYYY-MM-DD] [--warn-days 7] [--dry-run]
 
-Nécessite pdftotext (poppler) : brew install poppler.
-Repli : reports/fournisseurs/manifest.csv (filename,date,amount,currency,drive_file_id).
+Repli si OCR indisponible : reports/fournisseurs/manifest.csv
+(filename,date,amount,currency,drive_file_id).
 """
 from __future__ import annotations
 
@@ -30,9 +35,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 # Permet `python3 scripts/reconcile_fournisseurs.py` sans installation.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -42,15 +48,56 @@ DEFAULT_WARN_DAYS = 7
 AMOUNT_TOLERANCE = 0.01
 PERSO_TERMS = ("nael", "darwish")
 
-# Mois français pour le parsing des dates longues (« 15 mai 2026 »).
+# --- Remboursements perso en devise étrangère (passe 3) -------------------- #
+# Un reçu en devise (ex. hôtel norvégien NOK) payé avec une carte PERSO n'a pas
+# de transaction Qonto dans cette devise ; il est remboursé par un virement EUR
+# à « Nael Darwish ». On ne peut donc pas matcher sur le montant (NOK ≠ EUR).
+# Heuristique (validée sur N0560 Thon Hotel, NOK 278 -> virement 25.33€ du 17/06) :
+#   1. Le virement ne peut PAS précéder la dépense  -> settled_at >= date du reçu.
+#   2. Fenêtre courte après la dépense (REIMBURSE_WINDOW_DAYS).
+#   3. Taux implicite (montant_devise / montant_virement_EUR) dans une bande
+#      plausible pour la devise (_FX_BANDS).
+#   4. À égalité, le virement le plus proche gagne (le MÊME JOUR est le signal fort).
+# Résultat marqué confidence="warn" (FX approximatif -> à vérifier avant d'attacher).
+REIMBURSE_WINDOW_DAYS = 10
+_FX_BANDS = {            # montant en devise par 1 EUR (bandes approximatives)
+    "USD": (1.00, 1.20),
+    "GBP": (0.80, 0.92),
+    "CHF": (0.88, 1.06),
+    "NOK": (10.0, 12.2),
+    "SEK": (10.5, 12.3),
+    "DKK": (7.2, 7.7),
+    "MAD": (10.0, 11.3),  # dirham marocain (taux carte observé ~10.6)
+}
+
+OCR_DIR = Path(__file__).resolve().parent / "ocr"
+OCR_BIN = OCR_DIR / "ocrbin"
+OCR_SRC = OCR_DIR / "ocr_helper.swift"
+
+# Lignes à ignorer pour la détection du montant (versions, codes, n° internes).
+_NON_MONEY_LINE = re.compile(
+    r"version|num[ée]ro|production|auth|rcs|code|tel\b|t[ée]l\b|siret|tva\s*intra",
+    re.IGNORECASE,
+)
+
 _FR_MONTHS = {
+    # Français + allemand (factures FR/DE fréquentes).
     "janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4,
     "mai": 5, "juin": 6, "juillet": 7, "août": 8, "aout": 8,
     "septembre": 9, "octobre": 10, "novembre": 11, "décembre": 12, "decembre": 12,
+    "januar": 1, "februar": 2, "märz": 3, "marz": 3, "juni": 6, "juli": 7,
+    "oktober": 10, "dezember": 12,
 }
-
-# Symboles / codes -> code ISO 4217.
-_CURRENCY_SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP"}
+_EN_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+# Abréviations 3 lettres EN/FR/DE pour le format compact « 22APR26 », « 17 Jun'26 ».
+_MONTH_ABBR = {
+    "jan": 1, "feb": 2, "fév": 2, "mar": 3, "mär": 3, "apr": 4, "avr": 4,
+    "may": 5, "mai": 5, "jun": 6, "jui": 6, "jul": 7, "aug": 8, "aou": 8,
+    "sep": 9, "oct": 10, "okt": 10, "nov": 11, "dec": 12, "déc": 12, "dez": 12,
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -62,18 +109,14 @@ class SupplierInvoice:
     drive_file_id: str
     drive_name: str
     date: str           # ISO YYYY-MM-DD ("" si introuvable)
-    amount: float       # montant dans la devise de la facture (0.0 si introuvable)
-    currency: str       # ISO 4217 (EUR par défaut)
+    amount: float       # total débité (0.0 si introuvable)
+    currency: str       # ISO 4217, détecté pour l'affichage (EUR par défaut)
     raw_text: str = ""
     error: str = ""
 
     @property
     def is_valid(self) -> bool:
         return not self.error and bool(self.date) and self.amount > 0
-
-    @property
-    def is_foreign(self) -> bool:
-        return self.currency.upper() not in ("EUR", "")
 
 
 @dataclass
@@ -106,7 +149,7 @@ class ReconciliationReport:
 
 
 # --------------------------------------------------------------------------- #
-# Lecture des PDF
+# Extraction de texte : pdftotext, repli OCR Vision (macOS)
 # --------------------------------------------------------------------------- #
 def scan_input_dir(input_dir: Path) -> List[Path]:
     return sorted(input_dir.glob("*.pdf"))
@@ -116,9 +159,19 @@ def _pdftotext_bin() -> Optional[str]:
     found = shutil.which("pdftotext")
     if found:
         return found
-    for candidate in ["/opt/homebrew/bin/pdftotext", "/usr/local/bin/pdftotext"]:
-        if Path(candidate).exists():
-            return candidate
+    for c in ["/opt/homebrew/bin/pdftotext", "/usr/local/bin/pdftotext"]:
+        if Path(c).exists():
+            return c
+    return None
+
+
+def _pdftoppm_bin() -> Optional[str]:
+    found = shutil.which("pdftoppm")
+    if found:
+        return found
+    for c in ["/opt/homebrew/bin/pdftoppm", "/usr/local/bin/pdftoppm"]:
+        if Path(c).exists():
+            return c
     return None
 
 
@@ -133,106 +186,216 @@ def _run_pdftotext(path: Path) -> str:
     return proc.stdout
 
 
-def _parse_date(text: str) -> str:
-    """Première date trouvée au format ISO, sinon ""."""
+def _ensure_ocr_bin() -> Optional[str]:
+    """Renvoie le chemin du binaire OCR, le compilant au besoin (swiftc)."""
+    if OCR_BIN.exists():
+        return str(OCR_BIN)
+    if not OCR_SRC.exists() or not shutil.which("swiftc"):
+        return None
+    try:
+        subprocess.run(
+            ["swiftc", "-O", str(OCR_SRC), "-o", str(OCR_BIN)],
+            check=True, capture_output=True,
+        )
+        return str(OCR_BIN)
+    except Exception:
+        return None
+
+
+def _ocr_pdf(path: Path) -> str:
+    """OCR d'un PDF scanné : pdftoppm (PNG) -> Vision (ocrbin). "" si indisponible."""
+    binp = _ensure_ocr_bin()
+    ppm = _pdftoppm_bin()
+    if not binp or not ppm:
+        return ""
+    chunks: List[str] = []
+    with tempfile.TemporaryDirectory() as td:
+        prefix = str(Path(td) / "pg")
+        try:
+            subprocess.run([ppm, "-png", "-r", "200", "-f", "1", "-l", "3", str(path), prefix],
+                           check=True, capture_output=True)
+        except Exception:
+            return ""
+        for png in sorted(Path(td).glob("pg*.png")):
+            try:
+                r = subprocess.run([binp, str(png)], capture_output=True, text=True)
+                chunks.append(r.stdout)
+            except Exception:
+                pass
+    return "\n".join(chunks)
+
+
+def _cache_path(path: Path) -> Path:
+    """Sidecar texte : reports/fournisseurs/.ocr_cache/<nom>.txt."""
+    return path.parent.parent / ".ocr_cache" / (path.stem + ".txt")
+
+
+def _extract_text(path: Path) -> str:
+    """Texte du PDF : cache, sinon pdftotext, sinon OCR. Met le cache à jour.
+
+    L'OCR étant coûteux (~plusieurs s/page), le résultat est mis en cache : les
+    relances et le run hebdo ne ré-OCR-isent que les nouveaux fichiers.
+    """
+    cache = _cache_path(path)
+    try:
+        if cache.exists() and cache.stat().st_mtime >= path.stat().st_mtime:
+            return cache.read_text(encoding="utf-8")
+    except OSError:
+        pass
+
+    try:
+        txt = _run_pdftotext(path)
+    except Exception:
+        txt = ""
+    if len(txt.strip()) < 20:  # PDF scanné -> OCR
+        ocr = _ocr_pdf(path)
+        if len(ocr.strip()) > len(txt.strip()):
+            txt = ocr
+
+    if txt.strip():
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(txt, encoding="utf-8")
+        except OSError:
+            pass
+    return txt
+
+
+# --------------------------------------------------------------------------- #
+# Parsing : date, montant, devise
+# --------------------------------------------------------------------------- #
+def _parse_date(text: str, currency: str = "EUR") -> str:
+    """Première date trouvée au format ISO, sinon "".
+
+    `currency` départage l'ordre jour/mois ambigu des dates numériques :
+    USD -> MM/DD/YYYY (US), sinon DD/MM/YYYY (FR/EU).
+    """
+    # ISO YYYY-MM-DD
     m = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", text)
-    if m:
+    if m and 1 <= int(m.group(2)) <= 12:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-    m = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", text)
-    if m:
-        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        return f"{y:04d}-{mo:02d}-{d:02d}"
-    m = re.search(r"\b(\d{1,2})\s+([A-Za-zÀ-ÿ]+)\s+(\d{4})\b", text)
+
+    # Numérique : DD/MM/YYYY, MM/DD/YYYY, DD-MM-YYYY, DD.MM.YYYY (année 2 ou 4 chiffres).
+    us_first = currency.upper() == "USD"
+    for mm in re.finditer(r"\b(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})\b", text):
+        a, b, y = int(mm.group(1)), int(mm.group(2)), int(mm.group(3))
+        if y < 100:
+            y += 2000
+        if a > 12 and b <= 12:        # a ne peut être qu'un jour
+            d, mo = a, b
+        elif b > 12 and a <= 12:      # b ne peut être qu'un jour
+            d, mo = b, a
+        elif a <= 12 and b <= 12:     # ambigu -> ordre selon la devise
+            d, mo = (b, a) if us_first else (a, b)
+        else:
+            continue                  # les deux > 12 : invalide
+        if 1 <= mo <= 12 and 1 <= d <= 31 and 2000 <= y <= 2099:
+            return f"{y:04d}-{mo:02d}-{d:02d}"
+
+    # Long « 09 JUIN 2026 » / « 15. Mai 2026 » (FR/DE, point optionnel après le jour)
+    m = re.search(r"\b(\d{1,2})\.?\s+([A-Za-zÀ-ÿ]{3,})\s+(\d{4})\b", text)
     if m:
         mo = _FR_MONTHS.get(m.group(2).lower())
         if mo:
             return f"{int(m.group(3)):04d}-{mo:02d}-{int(m.group(1)):02d}"
+    # Anglais « Apr 14, 2026 » / « May 11 2026 »
+    m = re.search(r"\b([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})\b", text)
+    if m:
+        mo = _EN_MONTHS.get(m.group(1).lower()[:3])
+        if mo:
+            return f"{int(m.group(3)):04d}-{mo:02d}-{int(m.group(2)):02d}"
+    # Compact « 22APR26 » / « 17 Jun'26 » : jour, abrév 3 lettres, année 2-4 chiffres
+    m = re.search(r"\b(\d{1,2})\s*([A-Za-zÀ-ÿ]{3})['’.]?\s*(\d{2,4})\b", text)
+    if m:
+        mo = _MONTH_ABBR.get(m.group(2).lower())
+        if mo:
+            y = int(m.group(3))
+            if y < 100:
+                y += 2000
+            if 2000 <= y <= 2099:
+                return f"{y:04d}-{mo:02d}-{int(m.group(1)):02d}"
     return ""
 
 
 def _detect_currency(text: str) -> str:
-    """Devise dominante du texte. EUR par défaut.
+    """Devise du reçu. EUR par défaut.
 
-    Si plusieurs devises apparaissent, prend la plus fréquente ; départage par
-    EUR (devise par défaut des factures françaises).
+    Pour les paiements carte Qonto en devise, le rapprochement passe par
+    local_amount/local_currency (détection non critique). Mais pour les reçus
+    en devise payés PERSO (passe 3, remboursement EUR), la devise détectée est
+    indispensable pour choisir la bonne bande FX.
     """
-    from collections import Counter
-
-    counts: Counter = Counter()
-    for sym, code in _CURRENCY_SYMBOLS.items():
-        counts[code] += text.count(sym)
-    for code in ("EUR", "USD", "GBP"):
-        counts[code] += len(re.findall(rf"\b{code}\b", text))
-
-    counts = Counter({c: n for c, n in counts.items() if n > 0})
-    if not counts:
+    low = text.lower()
+    scores = {
+        "EUR": text.count("€") + len(re.findall(r"\beur\b|euro|carte bancaire", low)),
+        "USD": text.count("$") + len(re.findall(r"\busd\b|salestax|total tender", low)),
+        "GBP": text.count("£") + len(re.findall(r"\bgbp\b", low)),
+        "NOK": len(re.findall(r"\bnok\b|\bkr\b", low)),
+        "SEK": len(re.findall(r"\bsek\b", low)),
+        "DKK": len(re.findall(r"\bdkk\b", low)),
+        "CHF": len(re.findall(r"\bchf\b", low)),
+        "MAD": len(re.findall(r"\bmad\b|\bdhs?\b|dirham", low)),
+    }
+    best = max(scores, key=lambda c: scores[c])
+    if scores[best] == 0:
         return "EUR"
-    top = counts.most_common()
-    best_n = top[0][1]
-    tied = [c for c, n in top if n == best_n]
-    return "EUR" if "EUR" in tied else tied[0]
+    # À égalité avec EUR, EUR l'emporte (devise par défaut des factures FR).
+    if scores["EUR"] == scores[best]:
+        return "EUR"
+    return best
 
 
-def _parse_amount(text: str, currency: str) -> float:
-    """Total TTC dans la devise donnée, sinon 0.0.
+def _to_float(s: str) -> float:
+    s = s.replace(" ", "").replace("\xa0", "")
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
 
-    Cherche le montant près de « Total TTC » / « Total » / « Montant », puis
-    se rabat sur le plus grand montant répété (= total confirmé).
+
+def _parse_amount(text: str) -> float:
+    """Montant débité = le plus grand montant du reçu (pourboire inclus).
+
+    Ignore les lignes de versions / numéros / codes. Renvoie 0.0 si rien.
     """
-    sym = {"EUR": "€", "USD": r"\$", "GBP": "£"}.get(currency, "€")
-    code = currency
-    # Motif de montant : devise avant ou après le nombre.
-    num = r"\d{1,3}(?:[  ,.]\d{3})*[.,]\d{2}"
-    money = rf"(?:(?:{sym}|{code})\s*({num})|({num})\s*(?:{sym}|{code}))"
-
-    def _to_float(s: str) -> float:
-        s = s.replace(" ", "").replace(" ", "")
-        # Dernier séparateur = décimal ; les autres = milliers.
-        if "," in s and "." in s:
-            if s.rfind(",") > s.rfind("."):
-                s = s.replace(".", "").replace(",", ".")
-            else:
-                s = s.replace(",", "")
-        elif "," in s:
-            s = s.replace(",", ".")
-        try:
-            return float(s)
-        except ValueError:
-            return 0.0
-
-    # 1. Montant proche d'un libellé « Total » (frontière de mot pour éviter
-    #    « Sous-total » / « Subtotal »).
-    for label in ("Total TTC", "Montant total", "Total amount", "Amount due", "Total", "Montant"):
-        m = re.search(rf"(?<![A-Za-zÀ-ÿ]){label}[^\d\n]{{0,40}}{money}", text, re.IGNORECASE)
-        if m:
-            val = _to_float(m.group(1) or m.group(2) or "")
-            if val > 0:
-                return val
-
-    # 2. Plus grand montant apparaissant au moins deux fois.
-    cands = [m.group(1) or m.group(2) for m in re.finditer(money, text)]
-    cands = [c for c in cands if c]
-    if cands:
-        from collections import Counter
-        counts = Counter(cands)
-        repeated = [c for c, n in counts.items() if n >= 2]
-        if repeated:
-            return max(_to_float(c) for c in repeated)
-        return max(_to_float(c) for c in cands)
-    return 0.0
+    # Lookarounds : le nombre ne doit pas être collé à d'autres chiffres, points
+    # NI virgules, sinon on capte des numéros de reçu / TVA / versions
+    # (« R922212.9512 » -> 212.95, « Lightspeed 26.18.0 » -> 26.18,
+    #  « Luhtspeed (K) 25,30,1,34645 » -> 25,30). (?<![\d.,]) tête, (?![\d.,]) queue.
+    pat = re.compile(r"(?<![\d.,])\d{1,3}(?:[ \xa0,.]\d{3})*[.,]\d{2}(?![\d.,])")
+    amounts: List[float] = []
+    for line in text.splitlines():
+        if _NON_MONEY_LINE.search(line):
+            continue
+        for m in pat.finditer(line):
+            v = _to_float(m.group(0))
+            if 0 < v < 100000:
+                amounts.append(v)
+    return max(amounts) if amounts else 0.0
 
 
 def parse_invoice(pdf_path: Path, drive_file_id: str = "", drive_name: str = "") -> SupplierInvoice:
-    """Parse un PDF fournisseur. En cas d'échec : champ `error` rempli."""
+    """Parse un PDF fournisseur (texte ou OCR). En cas d'échec : champ `error`."""
     drive_name = drive_name or pdf_path.name
     try:
-        text = _run_pdftotext(pdf_path)
+        text = _extract_text(pdf_path)
     except Exception as exc:
         return SupplierInvoice(pdf_path, drive_file_id, drive_name, "", 0.0, "EUR", error=str(exc))
 
-    date = _parse_date(text)
+    if not text.strip():
+        return SupplierInvoice(pdf_path, drive_file_id, drive_name, "", 0.0, "EUR",
+                               error="texte illisible (ni pdftotext ni OCR)")
+
     currency = _detect_currency(text)
-    amount = _parse_amount(text, currency)
+    date = _parse_date(text, currency)
+    amount = _parse_amount(text)
 
     error = ""
     if not date:
@@ -247,7 +410,7 @@ def parse_invoice(pdf_path: Path, drive_file_id: str = "", drive_name: str = "")
 
 
 def _load_manifest(input_dir: Path) -> List[SupplierInvoice]:
-    """Repli quand pdftotext est absent : reports/fournisseurs/manifest.csv."""
+    """Repli explicite : reports/fournisseurs/manifest.csv."""
     manifest = input_dir.parent / "manifest.csv"
     if not manifest.exists():
         return []
@@ -270,7 +433,7 @@ def _load_manifest(input_dir: Path) -> List[SupplierInvoice]:
 
 
 def load_invoices(input_dir: Path, id_map: Optional[Dict[str, str]] = None) -> List[SupplierInvoice]:
-    """Charge les factures : manifest.csv si présent, sinon pdftotext sur PDF.
+    """Charge les factures : manifest.csv si présent, sinon parsing (texte/OCR).
 
     id_map : {nom_fichier -> drive_file_id} pour rattacher l'ID Drive au PDF.
     """
@@ -279,11 +442,9 @@ def load_invoices(input_dir: Path, id_map: Optional[Dict[str, str]] = None) -> L
     if manifest_path.exists():
         return _load_manifest(input_dir)
     pdfs = scan_input_dir(input_dir)
-    if pdfs and _pdftotext_bin():
-        return [parse_invoice(p, drive_file_id=id_map.get(p.name, "")) for p in pdfs]
     if not pdfs:
         raise SystemExit("Aucune facture fournisseur trouvée dans le dossier input.")
-    raise SystemExit("pdftotext introuvable. Installer : brew install poppler")
+    return [parse_invoice(p, drive_file_id=id_map.get(p.name, "")) for p in pdfs]
 
 
 # --------------------------------------------------------------------------- #
@@ -312,7 +473,7 @@ def load_qonto_debits(json_path: Path) -> List[QontoDebit]:
 
 
 # --------------------------------------------------------------------------- #
-# Rapprochement
+# Rapprochement (agnostique à la devise)
 # --------------------------------------------------------------------------- #
 def _days_between(d1: str, d2: str) -> int:
     from datetime import date
@@ -323,74 +484,98 @@ def _amount_close(a: float, b: float) -> bool:
     return abs(round(a, 2) - round(b, 2)) <= AMOUNT_TOLERANCE
 
 
-def _pick_closest(inv: SupplierInvoice, candidates: List[QontoDebit]) -> Optional[QontoDebit]:
-    """Candidat le plus proche dans le temps."""
-    if not candidates:
+def _strategy_for(inv: SupplierInvoice, t: QontoDebit) -> str:
+    """Étiquette de stratégie d'après la transaction retenue."""
+    if t.local_amount and _amount_close(t.local_amount, inv.amount) \
+            and t.local_currency not in ("", "EUR"):
+        return "foreign_currency"
+    if t.operation_type == "transfer" and any(x in t.label.lower() for x in PERSO_TERMS):
+        return "eur_transfer"
+    return "eur_card"
+
+
+def _days_signed(d_from: str, d_to: str) -> int:
+    """Jours de d_from à d_to (positif si d_to est après d_from)."""
+    from datetime import date
+    return (date.fromisoformat(d_to) - date.fromisoformat(d_from)).days
+
+
+def _foreign_perso_candidate(inv: SupplierInvoice, debits: List[QontoDebit],
+                             used: set) -> Optional[QontoDebit]:
+    """Virement perso EUR remboursant un reçu en devise. None si rien de plausible."""
+    band = _FX_BANDS.get(inv.currency.upper())
+    if not band:
         return None
-    return min(candidates, key=lambda t: _days_between(inv.date, t.settled_at) if t.settled_at else 9999)
+    lo, hi = band
+    cands = []
+    for t in debits:
+        if t.id in used or not t.settled_at:
+            continue
+        if t.operation_type != "transfer":
+            continue
+        if not any(x in t.label.lower() for x in PERSO_TERMS):
+            continue
+        delta = _days_signed(inv.date, t.settled_at)   # 1. virement après la dépense
+        if delta < 0 or delta > REIMBURSE_WINDOW_DAYS:  # 2. fenêtre courte
+            continue
+        if t.amount <= 0:
+            continue
+        fx = inv.amount / t.amount                       # 3. taux plausible
+        if lo <= fx <= hi:
+            cands.append((delta, t))
+    if not cands:
+        return None
+    cands.sort(key=lambda c: c[0])                       # 4. le plus proche (même jour gagne)
+    return cands[0][1]
 
 
 def match(invoices: List[SupplierInvoice], debits: List[QontoDebit],
           warn_days: int) -> ReconciliationReport:
-    """Rapprochement glouton en deux passes (EUR puis devise)."""
+    """Glouton en 3 passes.
+
+    Passe 1-2 : montant débité (max du reçu) comparé à amount ET local_amount.
+    Passe 3   : reçus en devise non matchés -> virement perso EUR via taux FX.
+    """
     report = ReconciliationReport()
     report.unmatched_invoices.extend(i for i in invoices if not i.is_valid)
 
     valid = sorted((i for i in invoices if i.is_valid), key=lambda i: i.date)
     used: set[str] = set()
+    unmatched: List[SupplierInvoice] = []
 
-    def _gap_filter(t: QontoDebit) -> bool:
-        return bool(t.settled_at) and _days_between(inv.date, t.settled_at) <= warn_days
-
-    # Passe 1 — factures EUR.
-    for inv in (i for i in valid if not i.is_foreign):
-        # (a) carte / prélèvement EUR (hors virements, traités en (b)).
+    # Passes 1-2 : match direct sur le montant (EUR ou devise via local_amount).
+    for inv in valid:
         cands = [
             t for t in debits
             if t.id not in used
-            and t.operation_type != "transfer"
-            and t.local_currency in ("", "EUR")
-            and _amount_close(t.amount, inv.amount)
-            and _gap_filter(t)
+            and t.settled_at
+            and _days_between(inv.date, t.settled_at) <= warn_days
+            and (_amount_close(t.amount, inv.amount)
+                 or _amount_close(t.local_amount, inv.amount))
         ]
-        strategy = "eur_card"
-        # (b) virement perso si pas de carte.
         if not cands:
-            cands = [
-                t for t in debits
-                if t.id not in used
-                and t.operation_type == "transfer"
-                and any(term in t.label.lower() for term in PERSO_TERMS)
-                and _amount_close(t.amount, inv.amount)
-                and _gap_filter(t)
-            ]
-            strategy = "eur_transfer"
-        best = _pick_closest(inv, cands)
-        if best is None:
-            report.unmatched_invoices.append(inv)
+            unmatched.append(inv)
             continue
+        best = min(cands, key=lambda t: _days_between(inv.date, t.settled_at))
         gap = _days_between(inv.date, best.settled_at)
         report.matched.append(MatchResult(
-            inv, best, gap, strategy, "exact" if gap <= warn_days else "warn",
+            inv, best, gap, _strategy_for(inv, best),
+            "exact" if gap <= warn_days else "warn",
         ))
         used.add(best.id)
 
-    # Passe 2 — factures en devise étrangère (match sur local_amount/local_currency).
-    for inv in (i for i in valid if i.is_foreign):
-        cands = [
-            t for t in debits
-            if t.id not in used
-            and t.local_currency == inv.currency.upper()
-            and _amount_close(t.local_amount, inv.amount)
-            and _gap_filter(t)
-        ]
-        best = _pick_closest(inv, cands)
+    # Passe 3 : reçus en devise étrangère payés perso -> virement EUR (FX approx).
+    for inv in unmatched:
+        if inv.currency.upper() not in _FX_BANDS:
+            report.unmatched_invoices.append(inv)
+            continue
+        best = _foreign_perso_candidate(inv, debits, used)
         if best is None:
             report.unmatched_invoices.append(inv)
             continue
         gap = _days_between(inv.date, best.settled_at)
         report.matched.append(MatchResult(
-            inv, best, gap, "foreign_currency", "exact" if gap <= warn_days else "warn",
+            inv, best, gap, "foreign_perso", "warn",  # FX approximatif -> à vérifier
         ))
         used.add(best.id)
 
@@ -429,6 +614,7 @@ _STRATEGY_LABEL = {
     "eur_card": "carte EUR",
     "eur_transfer": "virement perso",
     "foreign_currency": "carte devise",
+    "foreign_perso": "remb. perso devise (FX)",
 }
 
 
@@ -499,7 +685,7 @@ def print_summary(report: ReconciliationReport) -> None:
     for m in report.matched:
         flag = "  " if m.confidence == "exact" else "⚠ "
         print(
-            f"  {flag}{m.invoice.drive_name[:32]:<32} "
+            f"  {flag}{m.invoice.drive_name[:28]:<28} "
             f"{_fmt_amount(m.invoice.amount, m.invoice.currency):>12} "
             f"[{_STRATEGY_LABEL.get(m.match_strategy, m.match_strategy)}] "
             f"↔ {m.transaction.settled_at} (écart {m.date_gap_days} j)",
@@ -537,10 +723,11 @@ def main() -> int:
         return 0
 
     if args.dry_run:
-        print(f"[dry-run] {len(invoices)} facture(s) lue(s) :", file=sys.stderr)
+        ok = sum(1 for i in invoices if i.is_valid)
+        print(f"[dry-run] {len(invoices)} facture(s), {ok} lisible(s) :", file=sys.stderr)
         for inv in invoices:
             note = f"  ⚠ {inv.error}" if inv.error else ""
-            print(f"  {inv.drive_name[:36]:<36} {inv.date or '—':<12} "
+            print(f"  {inv.drive_name[:30]:<30} {inv.date or '—':<12} "
                   f"{_fmt_amount(inv.amount, inv.currency):>12}{note}", file=sys.stderr)
         return 0
 

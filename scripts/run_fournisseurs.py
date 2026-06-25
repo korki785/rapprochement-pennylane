@@ -80,10 +80,24 @@ def step1_fetch_drive(client: DriveClient, folder_name: str, input_dir: Path,
 def step4_upload(client: QontoClient, matches: List[Dict]) -> set:
     """Attache chaque PDF si la transaction n'a pas déjà de pièce jointe.
 
+    N'auto-attache QUE les rapprochements fiables (confidence="exact"). Les
+    rapprochements "warn" (ex. remboursements perso en devise via taux FX
+    approximatif) sont seulement listés : ils demandent une confirmation
+    humaine avant d'être attachés (voir le rapport markdown).
+
     Renvoie l'ensemble des drive_file_id effectivement traités (attaché ou déjà présent).
     """
     done: set = set()
+    warn = [m for m in matches if m.get("confidence") != "exact"]
+    if warn:
+        print(f"  {len(warn)} rapprochement(s) à confirmer (non attaché auto) :", file=sys.stderr)
+        for m in warn:
+            print(f"    ⚠ {m.get('invoice_name', Path(m['invoice_path']).name)} "
+                  f"[{m.get('match_strategy', '?')}] -> {m['qonto_date']} "
+                  f"(voir rapport)", file=sys.stderr)
     for m in matches:
+        if m.get("confidence") != "exact":
+            continue
         tx_id = m["qonto_transaction_id"]
         pdf = Path(m["invoice_path"])
         drive_id = m.get("drive_file_id", "")

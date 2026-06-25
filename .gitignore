@@ -15,3 +15,5 @@ gmail_credentials.json
 credentials.json
 token.json
 *.local
+scripts/ocr/ocrbin
+.DS_Store
