@@ -1,6 +1,12 @@
 # Rapprochement justificatifs → Qonto
 
-Deux flux automatisés de rapprochement : dépenses **USD** par carte (reçus Gmail pro) et remboursements **UberEats** (reçus Gmail perso → virements Qonto).
+Trois flux automatisés de rapprochement justificatif → transaction Qonto :
+
+1. **Dépenses USD** par carte (reçus Gmail pro → justificatif PDF).
+2. **UberEats** (reçus Gmail perso → virements de remboursement Qonto) — *continu, ≈ à chaque mail*.
+3. **Factures fournisseurs** (Google Drive, OCR) → carte/virement/devise — *continu, ≈ à chaque upload, + email hebdo des non-rapprochés*.
+
+Les flux 2 et 3 tournent en continu via des pollers launchd (toutes les 15 min) ; le flux 3 envoie un rapport email chaque lundi des justificatifs non rapprochés.
 
 ---
 
@@ -51,7 +57,7 @@ Nael paie UberEats avec carte perso → l'entreprise rembourse par virement Qont
 
 ### Workflow
 
-1. **Télécharger les reçus PDF** depuis la boîte Gmail personnelle : UberEats envoie automatiquement un email après chaque commande contenant un lien « Téléchargez ce PDF ». Playwright se connecte à Gmail perso, trouve les emails UberEats depuis la date cible, et télécharge les PDFs. *(script à venir : `scripts/fetch_ubereats_gmail.py`)*
+1. **Télécharger les reçus PDF** depuis la boîte Gmail personnelle : UberEats envoie automatiquement un email après chaque commande contenant un lien « Téléchargez ce PDF ». Playwright se connecte à Gmail perso, trouve les emails UberEats depuis la date cible, et télécharge les PDFs (`scripts/fetch_ubereats_gmail.py`).
 2. **Récupérer les virements Qonto** (`scripts/run_ubereats.py` via `src/recon/qonto_client.py`) — filtre les débits Qonto dont le libellé contient « Nael Darwish » depuis la date cible → `reports/ubereats/qonto_transfers.json`.
 3. **Rapprocher** (`scripts/reconcile_ubereats.py`) — associe chaque PDF (montant + date extraits par `pdftotext`) au virement de même montant à ±7 jours → `matches.json`.
 4. **Attacher** les PDFs aux transactions Qonto (`scripts/run_ubereats.py` étape 4).
@@ -73,30 +79,38 @@ brew install poppler   # pour pdftotext
 python3 scripts/run_ubereats.py --since 2026-04-01
 ```
 
-### Automatisation hebdomadaire (launchd)
+### Automatisation continue (≈ à chaque mail UberEats)
 
-Le script tourne automatiquement chaque **lundi à 9h** via launchd macOS :
+Un poller launchd tourne **toutes les 15 min** (`com.maisondarwish.ubereats-watch.plist`, `StartInterval=900`) :
+- **Nouveau mail UberEats détecté** (pré-check IMAP léger) → télécharge le reçu (Playwright) + rapproche + attache.
+- **Sinon** → retry léger reconcile+attach (rattrape les virements de remboursement arrivés depuis).
+
+Note métier : le reçu arrive par mail tout de suite, mais le virement de remboursement Qonto (« Nael Darwish ») arrive plus tard → le reçu est téléchargé vite, le rapprochement se fait dès que le virement apparaît.
 
 ```bash
 # Activer (une seule fois)
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.ubereats-recon.plist
+cp scripts/com.maisondarwish.ubereats-watch.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.ubereats-watch.plist
 
-# Vérifier
-launchctl list | grep ubereats
+# Forcer un passage immédiat (sans attendre 15 min)
+launchctl kickstart -k gui/$(id -u)/com.maisondarwish.ubereats-watch
 
-# Log de chaque exécution
-cat reports/ubereats/weekly_run.log
+# Vérifier / suivre
+launchctl list | grep ubereats        # "0" = dernier passage OK
+tail -f reports/ubereats/watch.log
 ```
 
-Le plist est dans `~/Library/LaunchAgents/com.maisondarwish.ubereats-recon.plist`.
+Prérequis : `.ubereats_session.json` (session Playwright UberEats, créée au 1er `--headed`) + `UBEREATS_GMAIL` / `UBEREATS_GMAIL_APP_PASSWORD` (app password 16 car. du Gmail perso).
 
 ### Scripts
 
 | Script | Rôle |
 |--------|------|
-| `scripts/fetch_ubereats_gmail.py` | Playwright → Gmail perso → télécharge PDFs reçus UberEats *(à venir)* |
+| `scripts/fetch_ubereats_gmail.py` | IMAP Gmail perso + Playwright → télécharge les reçus PDF UberEats |
+| `scripts/ubereats_has_new_email.py` | Pré-check IMAP léger : y a-t-il un nouveau mail UberEats ? (sans Playwright) |
 | `scripts/reconcile_ubereats.py` | Parse PDFs, rapproche avec virements Qonto |
-| `scripts/run_ubereats.py` | Orchestrateur bout-en-bout |
+| `scripts/run_ubereats.py` | Orchestrateur (`--skip-fetch`, `--fetch-since`, attach idempotent) |
+| `scripts/run_ubereats_watch.sh` | Wrapper du poller 15 min |
 | `src/recon/qonto_client.py` | Client REST Qonto (curl, contourne Cloudflare) |
 
 ### Notes
@@ -146,23 +160,39 @@ python3 scripts/run_fournisseurs.py --since 2026-04-01 --dry-run   # test, n'att
 python3 scripts/run_fournisseurs.py --since 2026-04-01             # flux complet
 ```
 
-### Automatisation hebdomadaire (launchd)
+### Automatisation continue + email hebdo (launchd)
 
-Tourne chaque **mercredi à 9h**. `--since` fixe au 01/04/2026 : une facture ajoutée tardivement au Drive est quand même rapprochée (`processed.json` évite le doublon).
+Deux jobs launchd :
+
+**1. Traitement continu (≈ à chaque upload Drive)** — poller toutes les 15 min (`com.maisondarwish.fournisseurs-watch.plist`, `StartInterval=900`) : ne traite que les nouveaux PDF Drive (sortie rapide sinon), `--since` fixe au 01/04/2026 (`processed.json` évite les doublons).
+
+**2. Email lundi 9h** (`com.maisondarwish.fournisseurs-email.plist`, Weekday=1) : `email_weekly.sh` (dédup hebdo `.derniere_semaine_email`) lance un run forcé puis `email_unreconciled.py` → envoie à `EMAIL_TO` (`hello@maisondarwish.com`) la liste des justificatifs **non rapprochés** uploadés les 7 derniers jours.
 
 ```bash
-cp scripts/com.maisondarwish.fournisseurs-recon.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.fournisseurs-recon.plist
-launchctl list | grep fournisseurs
+# Activer les deux (une seule fois)
+cp scripts/com.maisondarwish.fournisseurs-watch.plist ~/Library/LaunchAgents/
+cp scripts/com.maisondarwish.fournisseurs-email.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.fournisseurs-watch.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.fournisseurs-email.plist
+
+# Tester l'email à blanc / en vrai
+python3 scripts/email_unreconciled.py --all --dry-run
+python3 scripts/email_unreconciled.py --all
 ```
+
+Config email dans `.env` : `GMAIL_USER`, `GMAIL_APP_PASSWORD` (app password 16 car.), `EMAIL_TO`. Envoi via SMTP_SSL Gmail (`src/recon/mailer.py`).
 
 ### Scripts
 
 | Script | Rôle |
 |--------|------|
-| `src/recon/drive_client.py` | Client Google Drive (OAuth, liste + télécharge PDF) |
-| `scripts/reconcile_fournisseurs.py` | Parse PDF, rapproche (3 stratégies) |
-| `scripts/run_fournisseurs.py` | Orchestrateur 5 étapes |
+| `src/recon/drive_client.py` | Client Google Drive (OAuth, liste + télécharge PDF, `createdTime`) |
+| `scripts/reconcile_fournisseurs.py` | OCR + parse PDF, rapproche (4 stratégies) |
+| `scripts/run_fournisseurs.py` | Orchestrateur (`--force`, écrit `unreconciled.json`) |
+| `scripts/run_fournisseurs_watch.sh` | Wrapper du poller 15 min |
+| `scripts/email_unreconciled.py` | Digest email des non-rapprochés de la semaine |
+| `scripts/email_weekly.sh` | Wrapper email lundi (dédup hebdo) |
+| `src/recon/mailer.py` | Envoi email SMTP Gmail |
 
 ### Notes
 
