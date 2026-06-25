@@ -44,7 +44,14 @@ def main() -> int:
     parser.add_argument("--headed", action="store_true")
     parser.add_argument("--dry-run", action="store_true",
                         help="S'arrête après le rapprochement, n'attache rien sur Qonto.")
+    parser.add_argument("--skip-fetch", action="store_true",
+                        help="Saute le téléchargement Gmail/Playwright (étape 1). "
+                             "Re-tente seulement reconcile+attach sur les reçus déjà téléchargés.")
+    parser.add_argument("--fetch-since", default=None,
+                        help="Fenêtre du téléchargement Gmail (défaut = --since). "
+                             "Plus courte pour aller vite ; reconcile garde --since.")
     args = parser.parse_args()
+    fetch_since = args.fetch_since or args.since
 
     out_dir = Path(args.out_dir)
     input_dir = out_dir / "input"
@@ -52,16 +59,19 @@ def main() -> int:
     matches_path = out_dir / "matches.json"
 
     # --- 1. Télécharger les reçus PDF UberEats depuis Gmail perso ---------------
-    fetch_cmd = [
-        str(SCRIPTS / "fetch_ubereats_gmail.py"),
-        "--out-dir", str(input_dir),
-        "--since", args.since,
-    ]
-    if args.headed:
-        fetch_cmd.append("--headed")
-    if args.dry_run:
-        fetch_cmd.append("--dry-run")
-    _run(fetch_cmd, "1/4 Téléchargement des reçus UberEats (Gmail)")
+    if args.skip_fetch:
+        print("\n=== 1/4 Téléchargement sauté (--skip-fetch) ===", file=sys.stderr)
+    else:
+        fetch_cmd = [
+            str(SCRIPTS / "fetch_ubereats_gmail.py"),
+            "--out-dir", str(input_dir),
+            "--since", fetch_since,
+        ]
+        if args.headed:
+            fetch_cmd.append("--headed")
+        if args.dry_run:
+            fetch_cmd.append("--dry-run")
+        _run(fetch_cmd, "1/4 Téléchargement des reçus UberEats (Gmail)")
 
     # --- 2. Récupérer les virements de remboursement Qonto --------------------
     print("\n=== 2/4 Virements Qonto ===", file=sys.stderr)
@@ -95,16 +105,24 @@ def main() -> int:
         return 0
     matches = json.loads(matches_path.read_text(encoding="utf-8"))
     ok = 0
+    skip = 0
     for m in matches:
         tx_id = m["qonto_transaction_id"]
         pdf = Path(m["invoice_path"])
+        try:
+            if client.get_transaction_attachments(tx_id):
+                skip += 1
+                continue  # déjà documentée, pas de doublon
+        except Exception:
+            pass  # vérif impossible -> on tente l'attache
         try:
             client.upload_attachment(tx_id, pdf)
             ok += 1
             print(f"  ✓ {pdf.name} -> {tx_id}", file=sys.stderr)
         except Exception as exc:
             print(f"  ✗ {pdf.name}: {exc}", file=sys.stderr)
-    print(f"\n{ok}/{len(matches)} pièce(s) jointe(s) attachée(s) sur Qonto.", file=sys.stderr)
+    print(f"\n{ok} attachée(s), {skip} déjà documentée(s) (sur {len(matches)}).",
+          file=sys.stderr)
     return 0
 
 
