@@ -130,7 +130,7 @@ class DriveClient:
         while True:
             resp = self._svc().files().list(
                 q=query, spaces="drive",
-                fields="nextPageToken, files(id, name, modifiedTime)",
+                fields="nextPageToken, files(id, name, modifiedTime, createdTime)",
                 pageSize=100, pageToken=page_token,
             ).execute()
             for f in resp.get("files", []):
@@ -138,6 +138,7 @@ class DriveClient:
                     "id": f["id"],
                     "name": f.get("name", f["id"]),
                     "modifiedTime": f.get("modifiedTime", ""),
+                    "createdTime": f.get("createdTime", ""),
                 })
             page_token = resp.get("nextPageToken")
             if not page_token:

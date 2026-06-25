@@ -23,7 +23,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -55,13 +55,21 @@ def _load_processed(path: Path) -> Dict[str, dict]:
 
 # --- Étape 1 : Drive -------------------------------------------------------
 def step1_fetch_drive(client: DriveClient, folder_name: str, input_dir: Path,
-                      processed_path: Path) -> List[Dict]:
-    """Télécharge les PDF non encore traités. Renvoie [{id, name, local_path}]."""
+                      processed_path: Path) -> tuple[List[Dict], Dict[str, str]]:
+    """Télécharge les PDF non encore traités.
+
+    Renvoie (new_files, created_map) :
+      - new_files : [{id, name, local_path}] des fichiers fraîchement téléchargés.
+      - created_map : {nom_fichier_local -> createdTime Drive} pour TOUS les PDF
+        du dossier (sert au filtre « semaine d'avant » de l'email).
+    """
     processed = _load_processed(processed_path)
     folder_id = client.find_folder_id(folder_name)
     pdfs = client.list_pdfs(folder_id)
     new = [f for f in pdfs if f["id"] not in processed]
     print(f"{len(pdfs)} PDF dans Drive, {len(new)} nouveau(x).", file=sys.stderr)
+
+    created_map = {_safe_filename(f["name"]): f.get("createdTime", "") for f in pdfs}
 
     input_dir.mkdir(parents=True, exist_ok=True)
     out: List[Dict] = []
@@ -73,7 +81,30 @@ def step1_fetch_drive(client: DriveClient, folder_name: str, input_dir: Path,
             print(f"  ✓ {dest.name}", file=sys.stderr)
         except Exception as exc:
             print(f"  ✗ {f['name']} : {exc}", file=sys.stderr)
-    return out
+    return out, created_map
+
+
+def write_unreconciled_json(report, created_map: Dict[str, str], path: Path,
+                            processed_names: Optional[set] = None) -> None:
+    """Sérialise les factures non rapprochées (+ createdTime Drive) pour l'email.
+
+    Exclut les fichiers déjà traités (présents dans processed.json) : un
+    justificatif attaché manuellement ne doit pas réapparaître dans l'email.
+    """
+    processed_names = processed_names or set()
+    items = []
+    for inv in report.unmatched_invoices:
+        if inv.drive_name in processed_names:
+            continue
+        items.append({
+            "name": inv.drive_name,
+            "amount": round(inv.amount, 2) if inv.amount else 0.0,
+            "currency": inv.currency,
+            "date": inv.date,
+            "reason": inv.error or "aucune transaction correspondante",
+            "drive_created": created_map.get(inv.path.name, ""),
+        })
+    path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # --- Étape 4 : upload ------------------------------------------------------
@@ -145,6 +176,9 @@ def main() -> int:
                         help="Ouvre le navigateur pour la 1re autorisation Google Drive.")
     parser.add_argument("--dry-run", action="store_true",
                         help="S'arrête après le rapprochement, n'attache ni ne marque rien.")
+    parser.add_argument("--force", action="store_true",
+                        help="Force le rapprochement même sans nouveau fichier Drive "
+                             "(sinon sortie rapide — utile pour le polling 15 min).")
     args = parser.parse_args()
 
     load_dotenv()
@@ -160,7 +194,12 @@ def main() -> int:
     print("\n=== 1/5 Téléchargement des factures (Google Drive) ===", file=sys.stderr)
     drive = DriveClient(creds_path, token_path)
     drive.authenticate(headless=not args.auth)
-    new_files = step1_fetch_drive(drive, folder_name, input_dir, processed_path)
+    new_files, created_map = step1_fetch_drive(drive, folder_name, input_dir, processed_path)
+
+    # Sortie rapide pour le polling : rien de neuf et pas de --force.
+    if not new_files and not args.force:
+        print("Rien de nouveau dans Drive — sortie.", file=sys.stderr)
+        return 0
 
     if not any(input_dir.glob("*.pdf")):
         print("Aucun PDF à traiter.", file=sys.stderr)
@@ -188,6 +227,8 @@ def main() -> int:
     today = report.run_date[:10]
     recon.write_matches_json(report, out_dir / "matches.json")
     recon.write_reconciliation_report(report, out_dir / f"reconciliation_{today}.md")
+    processed_names = {v.get("name", "") for v in _load_processed(processed_path).values()}
+    write_unreconciled_json(report, created_map, out_dir / "unreconciled.json", processed_names)
     recon.print_summary(report)
 
     if args.dry_run:

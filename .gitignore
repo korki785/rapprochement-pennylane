@@ -17,3 +17,4 @@ token.json
 *.local
 scripts/ocr/ocrbin
 .DS_Store
+.derniere_semaine_email
