@@ -201,6 +201,81 @@ Config email dans `.env` : `GMAIL_USER`, `GMAIL_APP_PASSWORD` (app password 16 c
 
 ---
 
+## Flux 4 — Factures & reçus par email (saas)
+
+Balaye **tous les emails avec un justificatif** (Gmail `hello@maisondarwish.com`) depuis le 01/04/2026, sans liste blanche d'expéditeurs, et attache le PDF à la transaction Qonto correspondante. Trois sources :
+
+- **Factures PDF jointes** — abonnements (Anthropic/Claude, Aircall, Alan, Google Workspace, Kandbaz) et fournisseurs one-off (Agence Montparnasse, transport…).
+- **Reçus HTML** (Square, Sunday, Toast, Clover, SumUp) — pas de PDF joint : le corps HTML est rendu en PDF via **Chrome headless** (`--print-to-pdf`, avec retry).
+
+### Workflow (orchestré par `scripts/run_saas.py`)
+
+1. **Gmail** — `X-GM-RAW "has:attachment filename:pdf"` (factures) + recherche des expéditeurs de reçus (HTML). Télécharge / rend → `reports/saas/input/`. Balayage **incrémental** (en-têtes d'abord, saute `processed`/`manifest` sans télécharger). Identité par **Message-ID**.
+2. **Qonto** — `fetch_all_debits` → `qonto_debits.json`.
+3. **Rapprocher** — `reconcile_saas.py` :
+   - montant ± 0,01 € sur `amount` (EUR) **OU** `local_amount` (devise, ex. Anthropic facturé en USD)
+   - date dans une fenêtre (~15 j ; prélèvements/CB postérieurs à la facture)
+   - **garde-fou** : le PDF doit ressembler à une facture (`looks_like_invoice`)
+   - `confidence="exact"` (auto-attaché) **uniquement si un alias marchand ∈ libellé Qonto** (croisement nom ↔ libellé — évite le bon montant sur le mauvais marchand). L'alias vient des aliases connus (`saas_senders.csv`), du nom d'expéditeur, ou du marchand lu dans le reçu.
+   - facture « Maison Darwish » sans lien de nom → `warn` (listée, jamais auto-attachée)
+   - Montant lu sur la facture = **Total TTC / Net à payer** (jamais le plus grand nombre — évite prix unitaire / mentions légales).
+4. **Attacher** — `upload_attachment` (skip si la transaction a déjà une PJ → **idempotent**). Une même facture + son reçu de paiement sont fusionnés sur la même transaction.
+5. **Marquer** — Message-IDs attachés dans `processed.json` (retirés du `manifest.json` ; les non-rapprochés sont re-tentés).
+
+**Auto-réparation** : si un justificatif est supprimé sur Qonto, un re-run le retrouve dans l'email et le recolle — sans toucher au reste.
+
+### Setup (une seule fois)
+
+```bash
+brew install poppler   # pdftotext (déjà installé pour les autres flux)
+# Chrome requis pour les reçus HTML : /Applications/Google Chrome.app
+
+# .env : compte Gmail qui REÇOIT les factures (app password 16 car.)
+# SAAS_GMAIL=hello@maisondarwish.com
+# SAAS_GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx   ← myaccount.google.com/security → Mots de passe des applications
+# (IMAP doit être activé : Gmail → Paramètres → Transfert et POP/IMAP)
+```
+
+### Lancer
+
+```bash
+python3 scripts/run_saas.py --since 2026-04-01 --dry-run   # test : parse + rapproche, n'attache rien
+python3 scripts/run_saas.py --since 2026-04-01             # flux complet
+python3 scripts/run_saas.py --since 2026-04-01 --skip-fetch # re-tente reconcile+attach sans re-télécharger
+```
+
+Revoir `reports/saas/reconciliation_<date>.md` (surtout les `warn`) avant un run réel.
+
+### Automatisation continue (launchd)
+
+Poller toutes les 15 min (`com.maisondarwish.saas-watch.plist`, `StartInterval=900`) : si un nouvel email justificatif est détecté (`saas_has_new_email.py`, pré-check IMAP léger) → run complet ; sinon → `--skip-fetch` (rattrape les débits réglés après réception de la facture).
+
+```bash
+cp scripts/com.maisondarwish.saas-watch.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.saas-watch.plist
+# suivre : tail -f reports/saas/watch.log
+```
+
+### Scripts
+
+| Script | Rôle |
+|--------|------|
+| `src/recon/saas.py` | Parse PDF (Total TTC), reçus HTML, rendu Chrome, détection facture / société / vendeur |
+| `src/recon/saas_senders.csv` | Fournisseurs connus : domaines + alias de libellé Qonto |
+| `scripts/fetch_saas_gmail.py` | Balayage Gmail (PDF + reçus HTML), parse, dédup Message-ID |
+| `scripts/reconcile_saas.py` | Rapproche (montant + croisement nom + garde-fous) |
+| `scripts/run_saas.py` | Orchestrateur (`--since`, `--skip-fetch`, `--dry-run`) |
+| `scripts/saas_has_new_email.py` | Pré-check IMAP léger pour le poller |
+| `scripts/run_saas_watch.sh` | Wrapper du poller 15 min |
+
+### Notes
+
+- Card-SaaS **sans** facture email (Notion, OpenAI, Hostinger, Wix…) : factures sur portail uniquement → hors périmètre (sprint séparé).
+- Balayage = **INBOX** seulement (un justificatif présent uniquement dans « Envoyés » via transfert auto n'est pas lu).
+- Démarre au **01/04/2026**.
+
+---
+
 ## Notes générales
 
 - Pas de fabrication : un justificatif n'est attaché que si un **vrai reçu** existe.
