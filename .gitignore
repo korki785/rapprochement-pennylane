@@ -19,3 +19,4 @@ scripts/ocr/ocrbin
 .DS_Store
 .derniere_semaine_email
 .env.backup*
+.DS_Store
