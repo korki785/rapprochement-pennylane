@@ -9,3 +9,6 @@ QONTO,email,https://app.qonto.com,Factures de commissions bancaires - non synchr
 STRIPE,email,,Activer les email receipts côté marchand pour que la facture arrive dans Gmail.
 GOOGLE,email,https://payments.google.com,Google Workspace / Cloud - factures par email activables.
 OVH,email,https://www.ovh.com/manager,Factures envoyées par email.
+ANTHROPIC,email,https://console.anthropic.com,Claude. PDF joint (Invoice + Receipt). Carte USD ou EUR. Flux saas.
+CLAUDE,email,https://claude.ai,Abonnement Claude. Voir ANTHROPIC. Flux saas.
+AIRCALL,email,https://dashboard.aircall.io,Telephonie. PDF joint. Prelevement EUR (GC RE AIRCALL). Flux saas.

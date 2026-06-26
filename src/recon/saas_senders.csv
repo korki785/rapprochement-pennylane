@@ -1,0 +1,20 @@
+# Fournisseurs connus — aide à relier nom marchand ↔ libellé Qonto (flux « saas » v2).
+# Le balayage télécharge TOUS les PDF ; cette table ne FILTRE PLUS la recherche, elle
+# fournit juste des alias propres quand le nom d'expéditeur diffère du libellé bancaire.
+#
+#   name          : nom lisible.
+#   domains       : sous-chaînes cherchées dans l'expéditeur (From), séparées par « | ».
+#   label_aliases : motifs attendus dans le libellé Qonto (normalisés), séparés par « | ».
+#   trusted       : 1 = fournisseur de confiance (sert d'indice ; l'auto-attache exige
+#                   TOUJOURS un alias présent dans le libellé Qonto — voir reconcile_saas).
+#   note          : rappel.
+name,domains,label_aliases,trusted,note
+Anthropic,anthropic.com,ANTHROPIC|CLAUDE,1,Claude. Carte USD ou EUR. 2 PDF (Invoice + Receipt).
+Aircall,aircall.io,AIRCALL,1,Facture envoyée via netsuite -> détectée par alias dans le sujet. Prélèvement EUR (GC RE AIRCALL).
+Alan,alan.eu,ALAN,1,Mutuelle. Prélèvement EUR (Alan Insurance 113 €).
+Google,google.com,GOOGLE WORKSPACE|GOOGLE,1,Workspace. Carte EUR (Google Workspace_maiso 19,44 €).
+Kandbaz,kandbaz|zohobooks.com,KANDBAZ,1,Domiciliation. Facture PDF MAISON DARWISH. Prélèvement EUR (GC RE KANDBAZ).
+Montparnasse,agencemontparnasse.fr,AGENCE MONTPARNASSE|MONTPARNASSE,1,Agence de voyage. Factures 001-2xxxxx par virement.
+Transavia,transavia.com,TRANSAVIA,1,Billets avion. Confirmation PDF.
+AirFrance,airfrance|aa.com|americanairlines,AIR FRANCE|AMERICAN AIRLINES,1,Billets avion.
+SNCF,sncf,SNCF VOYAGEURS|SNCF,1,Billets train (souvent au nom du passager, pas la société).

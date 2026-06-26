@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.maisondarwish.saas-watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/naeldarwish/rapprochement-pennylane/scripts/run_saas_watch.sh</string>
+    </array>
+
+    <!-- Toutes les 15 minutes : traite les factures SaaS dès leur réception par email -->
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/naeldarwish/rapprochement-pennylane/reports/saas/watch_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/naeldarwish/rapprochement-pennylane/reports/saas/watch_stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/naeldarwish</string>
+    </dict>
+</dict>
+</plist>
