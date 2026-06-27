@@ -151,8 +151,10 @@ def _parse_amount(text: str) -> float:
     if m:
         return float(m.group(1).replace(",", "."))
 
-    # 2. Montant après "Total" suivi du nom du resto ou d'un saut de ligne.
-    m = re.search(r"Total\s*\n\s*(\d{1,4}[.,]\d{2})\s*€", text, re.IGNORECASE)
+    # 2. Ligne commençant par "Total" (montant chargé) + montant même ligne OU ligne suivante.
+    #    Ancrage début de ligne pour EXCLURE "Sous-total des articles" (montant brut).
+    #    Ex. layout : "Total                         16,75 €"  (≠ "Sous-total … 27,80 €").
+    m = re.search(r"(?:^|\n)\s*Total\b[^\n\d]*?(\d{1,4}[.,]\d{2})\s*€", text, re.IGNORECASE)
     if m:
         return float(m.group(1).replace(",", "."))
 

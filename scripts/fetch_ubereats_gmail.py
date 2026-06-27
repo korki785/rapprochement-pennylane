@@ -109,18 +109,17 @@ def find_pdf_url(html: str) -> Optional[str]:
     qui redirigent vers le vrai PDF. On cherche le lien dont le texte visible
     contient "PDF" ou "Téléchargez".
     """
-    # Chercher un <a href="...">...PDF...</a> ou "...Télécharg..." dans le texte du lien.
-    patterns = [
-        # href suivi directement du texte
-        r'href=["\']([^"\']{20,})["\'][^>]*>(?:[^<]*<[^>]+>){0,5}[^<]*(?:PDF|t[eé]l[eé]charg|download\s+PDF|receipt)',
-        # texte avant le href (structure inversée)
-        r'(?:PDF|t[eé]l[eé]charg|download)[^<]{0,300}href=["\']([^"\']{20,})["\']',
-    ]
-    for pattern in patterns:
-        for m in re.finditer(pattern, html, re.IGNORECASE | re.DOTALL):
-            url = m.group(1)
-            if any(x in url.lower() for x in ["unsubscribe", "optout", "mailto", "preference"]):
-                continue
+    # On parcourt CHAQUE ancre <a>…</a> et on retient celle dont le TEXTE VISIBLE évoque
+    # le reçu/PDF. L'ancienne regex (DOTALL + fenêtre de 5 balises) traversait plusieurs
+    # ancres et capturait par erreur le 1er href (logo « Uber Eats ») qui redirige vers
+    # UNE AUTRE commande → mauvais reçu téléchargé / reçu manquant.
+    for m in re.finditer(r'<a\b[^>]*href=["\']([^"\']{20,})["\'][^>]*>(.*?)</a>',
+                         html, re.IGNORECASE | re.DOTALL):
+        url, inner = m.group(1), m.group(2)
+        if any(x in url.lower() for x in ["unsubscribe", "optout", "mailto", "preference"]):
+            continue
+        text = re.sub(r"<[^>]+>", " ", inner)
+        if re.search(r"PDF|t[eé]l[eé]charg|download|re[çc]u|receipt", text, re.IGNORECASE):
             return url
 
     # Lien direct .pdf
@@ -186,69 +185,39 @@ def download_receipts_playwright(receipt_urls: List[str], out_dir: Path) -> int:
                 # Lire manifest si besoin depuis fichier existant.
                 continue
 
+            # Les liens « téléchargez ce PDF » résolvent vers /orders/<uuid>/download-receipt
+            # = téléchargement DIRECT (page.goto lève « Download is starting »). On capte
+            # donc le download ; repli sur le rendu HTML si l'URL est une page de reçu.
+            got = False
             try:
-                page.goto(url, timeout=20000)
-                page.wait_for_load_state("load", timeout=20000)
-                page.wait_for_timeout(2000)
+                with page.expect_download(timeout=25000) as di:
+                    try:
+                        page.goto(url, timeout=20000)
+                    except Exception:
+                        pass  # « Download is starting » attendu pour /download-receipt
+                di.value.save_as(str(dest))
+                got = dest.exists() and dest.stat().st_size > 1000
+            except Exception:
+                got = False
 
-                # Extraire montant + date directement du DOM (plus fiable que pdftotext).
-                data = page.evaluate("""() => {
-                    const text = document.body.innerText || '';
-                    // Montant : chercher Total suivi du montant dans le reçu.
-                    const amtM = text.match(/Total\\s*[\\d\\s]*\\n?\\s*([\\d]+[,.]\\d{2})\\s*€/)
-                        || text.match(/([\\d]+[,.]\\d{2})\\s*€\\s*$/m);
-                    // Date : chercher pattern dans le reçu (ex: "11 mai 2026" ou "May 11, 2026").
-                    const dateM = text.match(/\\b(\\d{1,2}\\s+(?:jan|fév|mar|avr|mai|juin|juil|août|sep|oct|nov|déc)[a-z]*\\s+\\d{4})\\b/i)
-                        || text.match(/\\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2},?\\s+\\d{4})\\b/);
-                    return {
-                        amount: amtM ? amtM[1] : null,
-                        date_raw: dateM ? dateM[1] : null,
-                    };
-                }""")
-
-                amount_str = (data.get("amount") or "").replace(",", ".")
-                date_raw = data.get("date_raw") or ""
+            if not got:
+                # Repli : l'URL est une page HTML de reçu → rendu en PDF.
                 try:
-                    amount = float(amount_str) if amount_str else 0.0
-                except ValueError:
-                    amount = 0.0
+                    page.goto(url, timeout=20000)
+                    page.wait_for_load_state("load", timeout=20000)
+                    page.wait_for_timeout(2000)
+                    page.pdf(path=str(dest), format="A4", print_background=True)
+                    got = dest.exists() and dest.stat().st_size > 1000
+                except Exception as exc:
+                    print(f"  ✗ [{i+1}] erreur : {exc}", file=sys.stderr)
 
-                # Parser la date.
-                date_iso = ""
-                if date_raw:
-                    fr_months = {"janvier":1,"février":2,"fevrier":2,"mars":3,"avril":4,
-                                 "mai":5,"juin":6,"juillet":7,"août":8,"aout":8,
-                                 "septembre":9,"octobre":10,"novembre":11,"décembre":12,"decembre":12}
-                    en_months = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
-                                 "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
-                    fm = re.search(r'(\d{1,2})\s+([A-Za-zÀ-ÿ]+)\s+(\d{4})', date_raw)
-                    if fm:
-                        mo = fr_months.get(fm.group(2).lower()) or en_months.get(fm.group(2).lower()[:3])
-                        if mo:
-                            date_iso = f"{int(fm.group(3)):04d}-{mo:02d}-{int(fm.group(1)):02d}"
-                    if not date_iso:
-                        em = re.search(r'([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})', date_raw)
-                        if em:
-                            mo = en_months.get(em.group(1).lower()[:3])
-                            if mo:
-                                date_iso = f"{int(em.group(3)):04d}-{mo:02d}-{int(em.group(2)):02d}"
-
-                page.pdf(path=str(dest), format="A4", print_background=True)
-                if dest.exists() and dest.stat().st_size > 1000:
-                    downloaded += 1
-                    print(f"  ✓ [{i+1}] {dest.name}  {date_iso}  {amount}€", file=sys.stderr)
-                    if amount > 0 and date_iso:
-                        manifest_rows.append({
-                            "filename": dest.name,
-                            "date": date_iso,
-                            "amount": round(amount, 2),
-                            "invoice_id": uuid,
-                        })
-                else:
-                    dest.unlink(missing_ok=True)
-                    print(f"  ✗ [{i+1}] PDF vide ({url[:60]}…)", file=sys.stderr)
-            except Exception as exc:
-                print(f"  ✗ [{i+1}] erreur : {exc}", file=sys.stderr)
+            if got:
+                downloaded += 1
+                print(f"  ✓ [{i+1}] {dest.name}", file=sys.stderr)
+                # Montant/date parsés par reconcile_ubereats (pdftotext) — pas besoin du DOM.
+            else:
+                dest.unlink(missing_ok=True)
+                print(f"  ✗ [{i+1}] échec téléchargement ({url[:60]}…)", file=sys.stderr)
 
         # Écrire manifest.csv pour reconcile_ubereats.py.
         if manifest_rows:
