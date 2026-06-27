@@ -199,6 +199,8 @@ Config email dans `.env` : `GMAIL_USER`, `GMAIL_APP_PASSWORD` (app password 16 c
 ### Notes
 
 - Pas de fabrication : seuls les vrais PDF du Drive sont attachés.
+- **Upload AVANT la transaction** : un justificatif sans transaction Qonto est gardé « en attente » et associé automatiquement quand la transaction arrive (re-tenté à chaque passage).
+- **Montant = Total payé** : gère les factures à remise (essaie plusieurs candidats — total labellisé puis max — au lieu du plus grand nombre brut).
 - Démarre au **01/04/2026** : rien avant cette date n'est scanné.
 
 ---
@@ -404,8 +406,9 @@ ne couvrait que les fournisseurs et se basait sur des snapshots/matching → pou
 
 1. **Best-effort** : relance les 4 flux → attache tout justificatif auto-trouvable.
 2. **Audit LIVE** (`audit_unreconciled.py`) : `QontoClient.fetch_unreconciled_expenses` lit le
-   vrai statut PJ (≠ snapshots périmés). Périmètre : CB + prélèvements + virements de
-   remboursement perso ; **exclut** virements internes « MAISON DARWISH » + frais Qonto.
+   vrai statut PJ (≠ snapshots périmés). **Tout l'exercice comptable en cours** (1er avril →
+   1er avril), pas juste 7 j → rattrape les vieilles transactions orphelines. Périmètre : CB +
+   prélèvements + virements de remboursement perso ; **exclut** « MAISON DARWISH » + frais Qonto.
 3. **Vérif adversariale** : pour chaque tx sans PJ, cherche un justificatif au même montant
    (±0,02 sur EUR ou devise, date ±10 j) dans les PDF locaux (montant = vrai total près d'un
    mot-clé « Total/payé/facturé », pas un taux de TVA) + Gmail (hello@ / perso / parishouse).
@@ -459,6 +462,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.weekly
 ---
 
 ## Historique récent
+
+**v1.4 (2026-06-27)** — Récap sur tout l'exercice comptable (≠ 7 j) ; parseur multi-candidats (factures à remise : Total, pas le prix avant remise) ; recherche montant insensible à la position du symbole (`€35.99`). Self-test parsing figé.
 
 **v1.3 (2026-06-27)** — Robustesse parsing : formats nombre US/FR/EU + dates EN ; marchand lu dans le PDF (justificatif auto-envoyé rapproché).
 

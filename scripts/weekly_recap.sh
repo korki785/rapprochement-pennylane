@@ -34,8 +34,8 @@ if [ -z "$DRY" ]; then
     "$PYTHON" scripts/run_portals.py --since "2026-04-01" >> "$LOG" 2>&1 || true
 fi
 
-# 2-3. Audit live + vérif adversariale (exit 2 si suspects).
-"$PYTHON" scripts/audit_unreconciled.py --days 7 >> "$LOG" 2>&1
+# 2-3. Audit live + vérif adversariale sur TOUT l'exercice comptable (exit 2 si suspects).
+"$PYTHON" scripts/audit_unreconciled.py >> "$LOG" 2>&1
 AUDIT_RC=$?
 
 # 4. Escalade si suspects.

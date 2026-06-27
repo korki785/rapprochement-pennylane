@@ -60,9 +60,32 @@ def live_test():
           not (A.search_local_pdfs(fake) or A.search_gmail(fake)))
 
 
+def parse_tests():
+    """Formats nombre/date + remise + position du symbole (figés pour éviter la récidive)."""
+    print("\nTests parsing montant (remise / formats / symbole) :")
+    import reconcile_fournisseurs as RF
+    from recon import saas
+    # Facture à remise (Hostinger) : le Total payé = 35,99, PAS le prix 63,99.
+    hostinger = ("Invoice Amount # €35.99 (EUR)\n"
+                 "€63.99 x 1   (€34.00)   €29.99   €6.00   €35.99\n"
+                 "Total excl. VAT   €29.99\nTotal   €35.99\nAmount Due (EUR)   €0.00")
+    cands = RF._amount_candidates(hostinger)
+    check("remise : candidat primaire = 35.99 (PAS 63.99)", bool(cands) and cands[0] == 35.99)
+    check("remise : 35.99 ∈ candidats", 35.99 in cands)
+    # Reçu resto : TOTAL TTC = 95,00 (max OK ici aussi).
+    resto = "TOTAL TTC   95,00€\nTVA 10%   8,64\nHT   86,36"
+    check("resto : Total TTC = 95.00", RF._amount_candidates(resto)[0] == 95.0)
+    # Format US à séparateur de milliers.
+    check("US « 1,156.41 » → 1156.41", saas._to_float("1,156.41") == 1156.41)
+    # Récap : symbole AVANT le montant (« €35.99 ») doit être trouvé.
+    check("récap : « Total €35.99 » (symbole avant) détecté",
+          A._pdf_has_total("Total   €35.99", ["35.99", "35,99"]))
+
+
 def main() -> int:
     load_dotenv()
     unit_tests()
+    parse_tests()
     try:
         live_test()
     except Exception as exc:

@@ -58,7 +58,19 @@ _SEARCH_EXCLUDE = ["qonto.com", "naelkodmani@gmail.com"]
 # --------------------------------------------------------------------------- #
 #  Recherche adversariale dans les sources de justificatifs
 # --------------------------------------------------------------------------- #
+_PDFTEXT_CACHE: dict = {}   # path -> texte (audit sur l'exercice = bcp de candidats × PDF)
+
+
 def _pdftotext(path: Path) -> str:
+    key = str(path)
+    if key in _PDFTEXT_CACHE:
+        return _PDFTEXT_CACHE[key]
+    txt = _pdftotext_raw(path)
+    _PDFTEXT_CACHE[key] = txt
+    return txt
+
+
+def _pdftotext_raw(path: Path) -> str:
     for binp in ("pdftotext", "/opt/homebrew/bin/pdftotext", "/usr/local/bin/pdftotext"):
         try:
             r = subprocess.run([binp, "-layout", str(path), "-"],
@@ -105,9 +117,11 @@ _TOTAL_KW = (r"(?:total|montant|pay[ée]\w*|factur[ée]|net\s+[àa]\s+payer|"
 def _pdf_has_total(txt: str, amt_strs: list) -> bool:
     for s in amt_strs:
         esc = re.escape(s)
-        if re.search(_TOTAL_KW + r"[^\n]{0,75}" + esc + r"\s*[€$]", txt, re.IGNORECASE):
+        # Symbole devise AVANT (« €35.99 ») OU APRÈS (« 35.99 € ») le montant.
+        money = r"(?:[€$£]\s*" + esc + r"|" + esc + r"\s*[€$£])"
+        if re.search(_TOTAL_KW + r"[^\n]{0,75}" + money, txt, re.IGNORECASE):
             return True
-        if re.search(esc + r"\s*[€$][^\n]{0,40}" + _TOTAL_KW, txt, re.IGNORECASE):
+        if re.search(money + r"[^\n]{0,40}" + _TOTAL_KW, txt, re.IGNORECASE):
             return True
     return False
 
@@ -159,7 +173,13 @@ def _gmail_search_box(env_user: str, env_pass: str, targets: list,
     if not amt_terms:
         return 0
     excl = " ".join(f"-from:{d}" for d in _SEARCH_EXCLUDE)
-    q = f'({" OR ".join(amt_terms)}) {excl} after:{d_from} before:{d_to}'
+    # Le SUJET doit ressembler à un justificatif (un vrai reçu/facture le porte en objet) ET
+    # le montant mentionné — sinon un mail quelconque qui cite le nombre = faux SUSPECT
+    # (bruit à l'échelle de l'exercice ; « total/payment » dans le corps = trop courant).
+    # Le PDF local reste, lui, un signal fort sans ce filtre.
+    kw = ("subject:(recu OR receipt OR facture OR invoice OR commande OR order OR "
+          "reservation OR confirmation OR payment)")
+    q = f'({" OR ".join(amt_terms)}) {kw} {excl} after:{d_from} before:{d_to}'
     try:
         m = imaplib.IMAP4_SSL("imap.gmail.com", 993)
         m.login(user, pwd)
@@ -254,15 +274,31 @@ def write_outputs(confirmed: list, suspects: list, since: str) -> None:
     (OUT_DIR / f"audit_{today}.md").write_text("\n".join(lines), encoding="utf-8")
 
 
+def _fiscal_year_start() -> str:
+    """Début de l'exercice comptable en cours (1er avril → 1er avril suivant)."""
+    t = date.today()
+    year = t.year if t.month >= 4 else t.year - 1
+    return f"{year:04d}-04-01"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Audit fiable des tx sans justificatif.")
-    ap.add_argument("--since", default=None, help="YYYY-MM-DD (défaut : aujourd'hui - --days).")
-    ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--since", default=None,
+                    help="YYYY-MM-DD (défaut : début de l'exercice comptable, 1er avril).")
+    ap.add_argument("--days", type=int, default=None,
+                    help="Fenêtre en jours (override ; défaut = exercice comptable).")
     ap.add_argument("--dry-run", action="store_true", help="N'écrit pas les fichiers, imprime le résumé.")
     args = ap.parse_args()
 
     load_dotenv()
-    since = args.since or (date.today() - timedelta(days=args.days)).isoformat()
+    # Défaut = TOUT l'exercice comptable (on ré-audite les vieilles tx orphelines dont le
+    # justificatif arrive plus tard). --since / --days restent pour override/tests.
+    if args.since:
+        since = args.since
+    elif args.days is not None:
+        since = (date.today() - timedelta(days=args.days)).isoformat()
+    else:
+        since = _fiscal_year_start()
     slug, secret = load_qonto_credentials()
     client = QontoClient(slug, secret)
 

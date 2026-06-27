@@ -109,10 +109,13 @@ class SupplierInvoice:
     drive_file_id: str
     drive_name: str
     date: str           # ISO YYYY-MM-DD ("" si introuvable)
-    amount: float       # total débité (0.0 si introuvable)
+    amount: float       # meilleur candidat = total débité (0.0 si introuvable)
     currency: str       # ISO 4217, détecté pour l'affichage (EUR par défaut)
     raw_text: str = ""
     error: str = ""
+    # Plusieurs interprétations du montant (total labellisé, max, …) : le match en
+    # essaie PLUSIEURS avant d'abandonner (cf. facture à remise Hostinger).
+    amount_candidates: List[float] = field(default_factory=list)
 
     @property
     def is_valid(self) -> bool:
@@ -360,25 +363,67 @@ def _to_float(s: str) -> float:
         return 0.0
 
 
-def _parse_amount(text: str) -> float:
-    """Montant débité = le plus grand montant du reçu (pourboire inclus).
+# Lookarounds : le nombre ne doit pas être collé à d'autres chiffres/points/virgules,
+# sinon on capte des numéros de reçu / versions (« R922212.9512 » -> 212.95). Gère les
+# milliers (« 1,156.41 » US, « 1 156,41 » FR). _to_float lève l'ambiguïté virgule/point.
+_MONEY_PAT = re.compile(r"(?<![\d.,])\d{1,3}(?:[ \xa0,.]\d{3})*[.,]\d{2}(?![\d.,])")
 
-    Ignore les lignes de versions / numéros / codes. Renvoie 0.0 si rien.
+# Labels d'un VRAI total payé, du plus spécifique au plus générique.
+_TOTAL_LABELS_RANKED = (
+    r"amount\s+paid", r"net\s+amount\s+paid", r"montant\s+(?:total\s+)?(?:pay[ée]|pr[ée]lev[ée])",
+    r"net\s+[àa]\s+payer", r"total\s+t\.?\s*t\.?\s*c", r"invoice\s+amount",
+    r"montant\s+total(?:\s+de\s+la\s+facture)?", r"grand\s+total", r"\btotal\b",
+)
+# Lignes « total » à NE PAS prendre (montant brut / HT / déjà payé = 0).
+_EXCL_TOTAL = re.compile(r"excl|hors\s*tax|\bh\.?t\.?\b|sous[\s-]?total|amount\s+due|\bdue\b",
+                         re.IGNORECASE)
+
+
+def _line_amounts(line: str) -> List[float]:
+    out = []
+    for m in _MONEY_PAT.finditer(line):
+        v = _to_float(m.group(0))
+        if 0 < v < 1_000_000:
+            out.append(v)
+    return out
+
+
+def _amount_candidates(text: str) -> List[float]:
+    """Tous les montants PLAUSIBLES pour le total payé, triés par fiabilité.
+
+    Le match en essaie plusieurs (« plusieurs re-checks ») : d'abord les totaux LABELLISÉS
+    (en excluant prix avant remise / HT / sous-total / « amount due » = 0), puis le max en
+    repli (reçus sans label). Évite de prendre « €63.99 x 1 » au lieu de « Total €35.99 ».
     """
-    # Lookarounds : le nombre ne doit pas être collé à d'autres chiffres, points
-    # NI virgules, sinon on capte des numéros de reçu / TVA / versions
-    # (« R922212.9512 » -> 212.95, « Lightspeed 26.18.0 » -> 26.18,
-    #  « Luhtspeed (K) 25,30,1,34645 » -> 25,30). (?<![\d.,]) tête, (?![\d.,]) queue.
-    pat = re.compile(r"(?<![\d.,])\d{1,3}(?:[ \xa0,.]\d{3})*[.,]\d{2}(?![\d.,])")
-    amounts: List[float] = []
+    labelled: List[tuple] = []     # (rang, valeur)
+    all_vals: List[float] = []
     for line in text.splitlines():
         if _NON_MONEY_LINE.search(line):
             continue
-        for m in pat.finditer(line):
-            v = _to_float(m.group(0))
-            if 0 < v < 100000:
-                amounts.append(v)
-    return max(amounts) if amounts else 0.0
+        vals = _line_amounts(line)
+        all_vals.extend(vals)
+        if not vals or _EXCL_TOTAL.search(line):
+            continue
+        low = line.lower()
+        for rank, lab in enumerate(_TOTAL_LABELS_RANKED):
+            if re.search(lab, low):
+                labelled.append((rank, vals[-1]))   # en -layout le total est à droite
+                break
+    out: List[float] = []
+    for _, v in sorted(labelled, key=lambda x: x[0]):
+        if v not in out:
+            out.append(v)
+    if all_vals:
+        mx = max(all_vals)
+        if mx not in out:
+            out.append(mx)                          # repli : reçu sans label de total
+    return out
+
+
+def _parse_amount(text: str) -> float:
+    """Meilleur montant (1er candidat). Compat : renvoie 0.0 si rien."""
+    cands = _amount_candidates(text)
+    return cands[0] if cands else 0.0
 
 
 def parse_invoice(pdf_path: Path, drive_file_id: str = "", drive_name: str = "") -> SupplierInvoice:
@@ -395,7 +440,8 @@ def parse_invoice(pdf_path: Path, drive_file_id: str = "", drive_name: str = "")
 
     currency = _detect_currency(text)
     date = _parse_date(text, currency)
-    amount = _parse_amount(text)
+    candidates = _amount_candidates(text)
+    amount = candidates[0] if candidates else 0.0
 
     error = ""
     if not date:
@@ -405,7 +451,7 @@ def parse_invoice(pdf_path: Path, drive_file_id: str = "", drive_name: str = "")
 
     return SupplierInvoice(
         pdf_path, drive_file_id, drive_name, date, amount, currency,
-        raw_text=text, error=error,
+        raw_text=text, error=error, amount_candidates=candidates,
     )
 
 
@@ -544,14 +590,16 @@ def match(invoices: List[SupplierInvoice], debits: List[QontoDebit],
     unmatched: List[SupplierInvoice] = []
 
     # Passes 1-2 : match direct sur le montant (EUR ou devise via local_amount).
+    # On essaie TOUS les candidats de montant (total labellisé, max…) avant d'abandonner.
     for inv in valid:
+        inv_amounts = inv.amount_candidates or [inv.amount]
         cands = [
             t for t in debits
             if t.id not in used
             and t.settled_at
             and _days_between(inv.date, t.settled_at) <= warn_days
-            and (_amount_close(t.amount, inv.amount)
-                 or _amount_close(t.local_amount, inv.amount))
+            and any(_amount_close(t.amount, a) or _amount_close(t.local_amount, a)
+                    for a in inv_amounts)
         ]
         if not cands:
             unmatched.append(inv)

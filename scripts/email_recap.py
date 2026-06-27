@@ -46,17 +46,16 @@ def _fmt(amount, currency: str) -> str:
 
 
 def build_recap(items: list) -> tuple:
-    monday = (date.today() - timedelta(days=date.today().weekday())).isoformat()
     n = len(items)
-    subject = f"[Récap] {n} transaction(s) sans justificatif — semaine du {monday}"
+    subject = f"[Récap] {n} transaction(s) sans justificatif — exercice en cours"
     if n == 0:
-        body = ("Bonjour,\n\nToutes les dépenses de la semaine ont un justificatif. "
+        body = ("Bonjour,\n\nToutes les dépenses de l'exercice en cours ont un justificatif. "
                 "Rien à signaler (vérifié sur le statut live Qonto + recherche des justificatifs).\n\n"
                 "— Récap rapprochement")
         return subject, body
 
     lines = ["Bonjour,", "",
-             f"{n} transaction(s) sans justificatif cette semaine "
+             f"{n} transaction(s) sans justificatif sur l'exercice en cours "
              "(vérifié live Qonto + recherche approfondie d'un justificatif avant envoi) :", ""]
     for it in sorted(items, key=lambda x: (x.get("date") or "", x.get("label", ""))):
         amt = _fmt(it.get("amount"), it.get("currency", "EUR"))
