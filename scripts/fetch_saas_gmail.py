@@ -49,6 +49,36 @@ def load_credentials() -> Tuple[str, str]:
     return gmail, password
 
 
+# Boîtes mail SECONDAIRES balayées en plus de SAAS_GMAIL. Certaines factures
+# fournisseur arrivent sur une autre adresse qui n'est PAS une boîte Maison Darwish
+# (ex. Lovable -> nael@parishouseofprayer.com, boîte perso/autre orga). On NE balaye
+# donc PAS tous les PDF (pollution par factures sans lien) : on RESTREINT aux
+# expéditeurs connus via `senders` (domaines). Champ par boîte :
+#   email_var, pass_var, senders(domaines à filtrer en From).
+_EXTRA_ACCOUNT_ENV = [
+    {"email_var": "LOVABLE_GMAIL", "pass_var": "LOVABLE_GMAIL_APP_PASSWORD",
+     "senders": ["lovable.dev", "lovable.app"]},
+]
+
+
+def load_extra_accounts() -> List[Tuple[str, str, Optional[List[str]]]]:
+    """(email, app_password, senders) des boîtes secondaires renseignées dans .env."""
+    load_dotenv()
+    out: List[Tuple[str, str, Optional[List[str]]]] = []
+    for acc in _EXTRA_ACCOUNT_ENV:
+        gmail = os.environ.get(acc["email_var"], "").strip()
+        password = os.environ.get(acc["pass_var"], "").strip().replace(" ", "")
+        if gmail and password:
+            out.append((gmail, password, acc.get("senders")))
+    return out
+
+
+def all_accounts() -> List[Tuple[str, str, Optional[List[str]]]]:
+    """Boîte principale (sweep complet, senders=None) + boîtes secondaires (filtrées)."""
+    gmail, password = load_credentials()
+    return [(gmail, password, None)] + load_extra_accounts()
+
+
 def connect_imap(gmail: str, password: str) -> imaplib.IMAP4_SSL:
     mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
     mail.login(gmail, password)
@@ -60,9 +90,18 @@ def _gmail_date(since: str) -> str:
     return datetime.strptime(since, "%Y-%m-%d").strftime("%Y/%m/%d")
 
 
-def search_pdf_emails(mail: imaplib.IMAP4_SSL, since: str) -> List[bytes]:
-    """UIDs de tous les emails avec PJ PDF depuis `since` (recherche Gmail X-GM-RAW)."""
+def search_pdf_emails(mail: imaplib.IMAP4_SSL, since: str,
+                      senders: Optional[List[str]] = None) -> List[bytes]:
+    """UIDs des emails avec PJ PDF depuis `since` (recherche Gmail X-GM-RAW).
+
+    `senders` : si fourni, restreint aux expéditeurs (domaines) listés — utilisé pour
+    les boîtes secondaires qui ne sont pas des boîtes Maison Darwish (évite d'aspirer
+    des factures sans lien). None = toute la boîte (boîte principale).
+    """
     query = f'has:attachment filename:pdf after:{_gmail_date(since)}'
+    if senders:
+        froms = " OR ".join(f"from:{d}" for d in senders)
+        query = f'has:attachment filename:pdf ({froms}) after:{_gmail_date(since)}'
     try:
         _, data = mail.uid("search", None, "X-GM-RAW", f'"{query}"')
     except imaplib.IMAP4.error as exc:
@@ -135,13 +174,33 @@ def _pick_primary(parsed_pdfs: List[Tuple[Path, "saas.ParsedPdf"]]) -> Tuple[Pat
 
 def fetch_invoices(out_dir: Path, since: str, processed_msgids: set,
                    dry_run: bool = False) -> List[Dict]:
-    """Balaye les emails avec PDF, parse, garde les factures. Renvoie les entrées manifest."""
-    gmail, password = load_credentials()
-    print(f"Connexion IMAP Gmail ({gmail})…", file=sys.stderr)
-    mail = connect_imap(gmail, password)
-    vendors = saas.load_vendors()
+    """Balaye TOUTES les boîtes (principale + secondaires), parse, garde les factures.
 
-    uids = search_pdf_emails(mail, since)
+    Idempotence par Message-ID, partagée entre boîtes (`already` accumulé) : un même
+    mail transféré sur deux adresses n'est gardé qu'une fois.
+    """
+    vendors = saas.load_vendors()
+    all_entries: List[Dict] = []
+    already = set(processed_msgids)
+    for gmail, password, senders in all_accounts():
+        print(f"Connexion IMAP Gmail ({gmail})…", file=sys.stderr)
+        mail = connect_imap(gmail, password)
+        entries = _sweep_mailbox(mail, out_dir, since, already, vendors, dry_run, senders)
+        mail.logout()
+        already |= {e["msgid"] for e in entries}
+        all_entries.extend(entries)
+    return all_entries
+
+
+def _sweep_mailbox(mail: imaplib.IMAP4_SSL, out_dir: Path, since: str,
+                   already: set, vendors, dry_run: bool,
+                   senders: Optional[List[str]] = None) -> List[Dict]:
+    """Balaye une boîte : PDF joints (factures) + reçus HTML. Renvoie les entrées manifest.
+
+    `senders` restreint le balayage PDF aux expéditeurs connus (boîtes secondaires).
+    La 2e passe reçus HTML n'est faite que sur la boîte principale (senders=None).
+    """
+    uids = search_pdf_emails(mail, since, senders)
     print(f"{len(uids)} email(s) avec PDF depuis {since}.", file=sys.stderr)
 
     entries: List[Dict] = []
@@ -152,7 +211,7 @@ def fetch_invoices(out_dir: Path, since: str, processed_msgids: set,
         if head is None:
             continue
         msgid = _decode(head.get("Message-ID", "")).strip() or f"uid:{uid.decode()}"
-        if msgid in processed_msgids:
+        if msgid in already:
             continue
         from_hdr = _decode(head.get("From", ""))
         subject = _decode(head.get("Subject", ""))
@@ -216,10 +275,11 @@ def fetch_invoices(out_dir: Path, since: str, processed_msgids: set,
               file=sys.stderr)
 
     # 2e passe : reçus HTML (Square/Sunday/Toast…) sans pièce jointe.
-    seen_ids = processed_msgids | {e["msgid"] for e in entries}
-    entries.extend(fetch_html_receipts(mail, out_dir, since, seen_ids, dry_run))
+    # Uniquement sur la boîte principale (les boîtes secondaires sont filtrées par vendeur).
+    if senders is None:
+        seen_ids = already | {e["msgid"] for e in entries}
+        entries.extend(fetch_html_receipts(mail, out_dir, since, seen_ids, dry_run))
 
-    mail.logout()
     if not dry_run:
         print(f"{kept} facture(s) PDF gardée(s), {skipped} non-facture ignoré(s).", file=sys.stderr)
     return entries
@@ -313,18 +373,18 @@ def fetch_html_receipts(mail: imaplib.IMAP4_SSL, out_dir: Path, since: str,
 
 
 def list_message_ids(since: str) -> List[str]:
-    """Message-IDs des emails avec PDF depuis `since` (pré-check poller)."""
-    gmail, password = load_credentials()
-    mail = connect_imap(gmail, password)
+    """Message-IDs des emails avec PDF depuis `since`, TOUTES boîtes (pré-check poller)."""
     ids: List[str] = []
-    for uid in search_pdf_emails(mail, since):
-        _, data = mail.uid("fetch", uid, "(BODY[HEADER.FIELDS (MESSAGE-ID)])")
-        if data and data[0]:
-            raw = data[0][1].decode("utf-8", errors="replace")
-            mid = raw.split(":", 1)[1].strip() if ":" in raw else raw.strip()
-            if mid:
-                ids.append(mid)
-    mail.logout()
+    for gmail, password, senders in all_accounts():
+        mail = connect_imap(gmail, password)
+        for uid in search_pdf_emails(mail, since, senders):
+            _, data = mail.uid("fetch", uid, "(BODY[HEADER.FIELDS (MESSAGE-ID)])")
+            if data and data[0]:
+                raw = data[0][1].decode("utf-8", errors="replace")
+                mid = raw.split(":", 1)[1].strip() if ":" in raw else raw.strip()
+                if mid:
+                    ids.append(mid)
+        mail.logout()
     return ids
 
 

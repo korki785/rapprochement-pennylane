@@ -1,0 +1,17 @@
+# Flux 5 — Portails : mapping libellé Qonto → handler Playwright
+# qonto_label_patterns : motifs (|) cherchés dans le libellé de la transaction (casse ignorée)
+# handler_key          : clé unique = nom du script fetch_{handler_key}.py
+# env_prefix           : préfixe pour {PREFIX}_EMAIL / {PREFIX}_PASSWORD dans .env
+# billing_url          : URL de départ pour le fetcher
+name,qonto_label_patterns,handler_key,env_prefix,billing_url,note
+OpenAI,OPENAI|CHATGPT,openai,OPENAI,https://platform.openai.com/account/billing,~21€/mois
+Notion,NOTION LABS|NOTION,notion,NOTION,https://www.notion.so/my-account,13.80€/mois
+Wix,WIX,wix,WIX,https://manage.wix.com/account/billing-and-payments,2 sites ~10+19€/mois
+Hunter,HUNTER,hunter,HUNTER,https://hunter.io/account/billing,49€/mois
+Hostinger,HOSTINGER,hostinger,HOSTINGER,https://hpanel.hostinger.com/billing,renouvellements
+Bolt,BOLT.EU,bolt,BOLT,https://bolt.eu/en/profile/trips/,reçus courses
+UberRides,UBR* PENDING,uber_rides,UBER,https://riders.uber.com/trips,reçus courses
+QRCodeGen,QR-CODE-GENERATOR,qr_gen,QRCODEGEN,https://www.qr-code-generator.com/account/,annuel?
+Bouygues,BOUYGUES TELECOM,bouygues,BOUYGUES,https://www.bouyguestelecom.fr/mon-compte/,~20€/mois
+Airbnb,AIRBNB,airbnb,AIRBNB,https://www.airbnb.fr/trips/,ponctuel
+Turo,TURO INC,turo,TURO,https://turo.com/us/en/trips/,location voiture
