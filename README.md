@@ -284,19 +284,23 @@ Détecte les transactions Qonto sans PJ → scrape les portails de facturation (
 
 ### Vendeurs supportés
 
-| Vendeur | Endpoint | Login | Notes |
-|---------|----------|-------|-------|
-| Wix | manage.wix.com/account/billing-history | email/password | Historique de facturation (data-hook invoice-number) |
-| Notion | app.notion.com → Paramètres → Facturation | email/SSO | Modal settingsréelle, View invoice → render PDF |
-| OpenAI/ChatGPT | chatgpt.com → Paramètres → Facturation | (real Chrome CDP) | Contourne Cloudflare via port 9222 |
-| Hunter | hunter.io/account/billing | email/password | Clean billing page |
-| Hostinger | hpanel.hostinger.com/billing | email/password | Renouvellements domaine+hosting |
-| QR-Code-Generator | qr-code-generator.com/account/ | email/password | Annuel ou ponctuel |
-| Bouygues | bouyguestelecom.fr/mon-compte | email/password | Portail FR, timeouts longs |
-| Airbnb | airbnb.com/trips | email/password | Probablement Cloudflare → fallback manuel |
-| Turo | turo.com/us/en/trips/ | email/password | Location voiture, likely Cloudflare |
-| Bolt | bolt.eu/en/profile/trips | phone/OTP | Courses, 2FA SMS → `--init-session` obligatoire |
-| Uber Rides | riders.uber.com/trips | email/Google | Courses (differ from UberEats) |
+| Vendeur | Endpoint | Login | Statut / Notes |
+|---------|----------|-------|----------------|
+| Wix | manage.wix.com/account/billing-history | email/password | ✅ Historique de facturation (data-hook invoice-number, download natif) |
+| Notion | app.notion.com → Paramètres → Facturation | email/SSO | ✅ Modal Settings réelle, View invoice → render PDF |
+| OpenAI/ChatGPT | chatgpt.com → Paramètres → Facturation | (real Chrome CDP) | ✅ Contourne Cloudflare via CDP port 9222 → Stripe |
+| Uber Rides | riders.uber.com/trips | email/Google (= UberEats) | ✅ Course → Details → « Download Invoice ». Date sans année (infère ≤ today) |
+| Hunter | hunter.io/account/billing | email/password | ⏳ À faire (billing page probablement clean) |
+| Hostinger | hpanel.hostinger.com/billing | email/password | ⏳ À faire (renouvellements domaine+hosting) |
+| QR-Code-Generator | qr-code-generator.com/account/ | email/password | ⏳ À faire (annuel ou ponctuel) |
+| Bouygues | bouyguestelecom.fr/mon-compte | email/password | ⏳ À faire (portail FR, timeouts longs) |
+| Airbnb | airbnb.com/trips | email/password | ⏳ À faire (probablement Cloudflare → technique CDP) |
+| Turo | turo.com/us/en/trips/ | email/password | ⏳ À faire (location voiture, probablement Cloudflare) |
+| ~~Bolt~~ | — | — | ❌ PAS de portail web (mobile-only). Reçus HTML par email → **flux SAAS** (`bolt.eu`) |
+
+> **Uber « PENDING »** : un débit `UBR* PENDING.UBER.COM` est une pré-autorisation. Tant qu'Uber n'a pas
+> finalisé la course, aucune facture n'existe (ni portail, ni email) → non rapprochable jusqu'à finalisation.
+> Le poller la rattrape automatiquement quand le reçu apparaît.
 
 ### Workflow (orchestré par `scripts/run_portals.py`)
 
@@ -396,12 +400,17 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.portal
 
 ## Historique récent
 
-**v1.0 (commit 67449fb, 2026-06-27)** — Flux 5 (portails vendeurs) complet
-- Scrapers Playwright pour 11 vendeurs (Wix, Notion, OpenAI, Hunter, Hostinger, QR-Code-Gen, Bouygues, Airbnb, Turo, Bolt, Uber Rides)
+**v1.1 (2026-06-27)** — Uber Rides + Bolt
+- Uber Rides : scraper riders.uber.com (Details → Download Invoice, date sans année inférée). 1 attaché.
+- Bolt : pas de portail web (mobile-only) → reçus HTML par email routés vers le flux SAAS. 4 attachés.
+- `parse_html_receipt` étendu (Bolt : « Montant facturé X € », date FR « 11 mai 2026 »).
+- **17 justificatifs attachés au total** (Wix 6, Notion 3, ChatGPT 3, Uber 1, Bolt 4).
+
+**v1.0 (commit 67449fb, 2026-06-27)** — Flux 5 (portails vendeurs)
+- Scrapers Playwright (Wix, Notion, OpenAI, Hunter, Hostinger, QR-Code-Gen, Bouygues, Airbnb, Turo, Uber Rides)
 - Contournement CAPTCHA Cloudflare via CDP Chrome (port 9222) pour OpenAI/ChatGPT
 - Fallback manuel (ingest_drop.py) pour les portails CAPTCHA-bloqués
 - Orchestrateur + launchd poller 15 min
-- 12 justificatifs attachés (Wix 6, Notion 3, ChatGPT 3)
 
 **Fluxes antérieurs**
 - Flux 1 : Dépenses USD carte (reçus Gmail Square/Toast → PDF générés)
