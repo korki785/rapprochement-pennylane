@@ -391,6 +391,64 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.portal
 
 ---
 
+## Récap hebdo FIABLE (lundi 9h)
+
+Mail récap des transactions **sans justificatif** — refondu pour être DIGNE DE CONFIANCE :
+ne déclare jamais un item « non rapproché » sans avoir (1) vérifié le statut PJ **en direct
+sur Qonto** et (2) **cherché activement** le reçu. Remplace l'ancien `email_weekly.sh` (qui
+ne couvrait que les fournisseurs et se basait sur des snapshots/matching → pouvait être faux).
+
+### Déroulé (`scripts/weekly_recap.sh`, lundi 9h)
+
+1. **Best-effort** : relance les 4 flux → attache tout justificatif auto-trouvable.
+2. **Audit LIVE** (`audit_unreconciled.py`) : `QontoClient.fetch_unreconciled_expenses` lit le
+   vrai statut PJ (≠ snapshots périmés). Périmètre : CB + prélèvements + virements de
+   remboursement perso ; **exclut** virements internes « MAISON DARWISH » + frais Qonto.
+3. **Vérif adversariale** : pour chaque tx sans PJ, cherche un justificatif au même montant
+   (±0,02 sur EUR ou devise, date ±10 j) dans les PDF locaux (montant = vrai total près d'un
+   mot-clé « Total/payé/facturé », pas un taux de TVA) + Gmail (hello@ / perso / parishouse).
+   → **CONFIRMED** (rien trouvé) vs **SUSPECT** (justificatif existe mais pas attaché = bug).
+4. **Doute** (autonome + repli) : suspects → escalade `claude -p` headless qui attache le vrai
+   justificatif ou confirme/`needs_review` ; **jamais deviner**. Repli (claude indispo ou doute
+   non levé) → récap **bloqué** + alerte courte « à vérifier » (jamais de récap faux).
+5. **Envoi** (`email_recap.py`) : récap transaction-centric (CONFIRMED) ou alerte (needs_review).
+
+### Garantie
+
+Ne peut PAS dire « X non rapproché » si un justificatif existe vraiment — il cherche d'abord.
+
+### Vérifier que ça marche
+
+```bash
+python3 scripts/selftest_recap.py                          # prouve la détection (16,75 → SUSPECT, faux → CONFIRMED)
+python3 scripts/audit_unreconciled.py --days 7 --dry-run   # audit live (lecture seule)
+DRY=1 bash scripts/weekly_recap.sh                         # chaîne complète à blanc
+```
+
+### Activer
+
+```bash
+launchctl bootout gui/$(id -u)/com.maisondarwish.fournisseurs-email 2>/dev/null
+cp scripts/com.maisondarwish.weekly-recap.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.weekly-recap.plist
+```
+
+### Fichiers
+
+| Fichier | Rôle |
+|--------|------|
+| `scripts/audit_unreconciled.py` | Audit live Qonto + recherche adversariale du justificatif |
+| `scripts/email_recap.py` | Mail récap (confirmés) ou alerte (à vérifier) |
+| `scripts/weekly_recap.sh` | Orchestrateur lundi (flux → audit → escalade → mail), dédup, `DRY=1` |
+| `scripts/recap_escalation_prompt.txt` | Consignes Claude headless en cas de doute |
+| `scripts/selftest_recap.py` | Auto-test rejouable |
+| `com.maisondarwish.weekly-recap.plist` | Programmation lundi 9h |
+
+> `claude -p` utilise le CLI Claude Code déjà authentifié (coût tokens seulement les semaines
+> avec un doute). Si l'auth expire → bascule auto en repli (bloquer + alerter).
+
+---
+
 ## Notes générales
 
 - Pas de fabrication : un justificatif n'est attaché que si un **vrai reçu** existe.
@@ -399,6 +457,13 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.portal
 ---
 
 ## Historique récent
+
+**v1.2 (2026-06-27)** — Récap hebdo fiable
+- Récap transaction-centric basé sur la vérité **live Qonto** + vérification adversariale avant envoi
+  (cherche le justificatif avant de déclarer « non rapproché »). Escalade Claude autonome + repli.
+- Corrections UberEats (trouvées en fiabilisant) : `find_pdf_url` (bon lien), download direct
+  (`expect_download`), montant `Total` (pas `Sous-total`).
+- `selftest_recap.py` : preuve rejouable.
 
 **v1.1 (2026-06-27)** — Uber Rides + Bolt
 - Uber Rides : scraper riders.uber.com (Details → Download Invoice, date sans année inférée). 1 attaché.
