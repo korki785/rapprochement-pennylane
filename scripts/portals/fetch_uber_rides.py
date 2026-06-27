@@ -68,104 +68,105 @@ def _login(page, ctx, email: str, password: str, init_session: bool) -> None:
         print(f"  ⚠ Connexion Uber échouée ({exc}). Relancer avec --init-session.", file=sys.stderr)
 
 
+_DL_SELECTOR = ('button:has-text("Download Invoice"), a:has-text("Download Invoice"), '
+                '[role="button"]:has-text("Download Invoice")')
+
+
 def _collect_trips(page, ctx, since: str, out_dir: Path, dry_run: bool) -> list:
+    page.goto(TRIPS_URL, timeout=60_000, wait_until="domcontentloaded")
+    page.wait_for_timeout(6000)
     dismiss_popups(page)
-
-    for _ in range(15):
+    for _ in range(6):
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(1200)
+        page.wait_for_timeout(1000)
 
-    trip_links = page.query_selector_all(
-        'a[href*="/trips/"], a:has-text("View receipt"), '
-        'button:has-text("View receipt"), [data-testid*="trip"]'
+    # Chaque course = un lien « Details » href=/trips/<uuid> ; la carte parente porte
+    # « <lieu> | <Mois JJ • heure> | €<montant> | … ». On mappe href → texte de carte.
+    cards = page.eval_on_selector_all(
+        "a[href*='/trips/']",
+        """els => els.map(e => {
+            const href = e.getAttribute('href') || '';
+            let p = e, row = '';
+            for (let i = 0; i < 10; i++) {
+                if (!p.parentElement) break; p = p.parentElement;
+                const t = (p.innerText || '').replace(/\\n/g,' | ');
+                if ((t.includes('€') || t.includes('$')) && t.length < 400) { row = t; break; }
+            }
+            return { href, row };
+        }).filter(x => /\\/trips\\/[0-9a-f]{8}-/.test(x.href) && x.row)"""
     )
-    print(f"  {len(trip_links)} course(s) trouvée(s).", file=sys.stderr)
+    # Dédup par href.
+    seen_href, trips = set(), []
+    for c in cards:
+        if c["href"] in seen_href:
+            continue
+        seen_href.add(c["href"])
+        trips.append(c)
+    print(f"  {len(trips)} course(s) trouvée(s).", file=sys.stderr)
 
     rows = []
-    seen = set()
-    for i, link in enumerate(trip_links):
-        try:
-            card_text = link.evaluate("""el => {
-                let p = el;
-                for (let i = 0; i < 10; i++) {
-                    if (!p.parentElement) break;
-                    p = p.parentElement;
-                    const t = p.innerText || '';
-                    if ((t.includes('€') || t.includes('$')) && t.length < 600) return t;
-                }
-                return '';
-            }""") or ""
-            href = link.get_attribute("href") or ""
-        except Exception:
-            card_text = ""
-            href = ""
-
-        amt_m = re.search(r'[\$€]\s*(\d+[.,]\d{2})', card_text) \
-             or re.search(r'(\d+[.,]\d{2})\s*[\$€]', card_text)
+    for c in trips:
+        row = c["row"]
+        amt_m = re.search(r'[\$€]\s*(\d+[.,]\d{2})', row) or re.search(r'(\d+[.,]\d{2})\s*[\$€]', row)
         amount = float(amt_m.group(1).replace(",", ".")) if amt_m else 0.0
-        date_iso = _extract_date(card_text)
-
-        if date_iso and since and date_iso < since:
+        date_iso = _extract_date(row)
+        if not date_iso:
             continue
-
-        key = f"{date_iso}_{amount:.2f}"
-        if key in seen:
+        if since and date_iso < since:
             continue
-        seen.add(key)
 
         if dry_run:
-            print(f"  [dry-run] {date_iso}  {amount:.2f}", file=sys.stderr)
+            print(f"  [dry-run] {date_iso}  {amount:.2f}€", file=sys.stderr)
             continue
 
-        filename = f"uber_{date_iso or f'item{i:03d}'}_{amount:.2f}.pdf"
-        out_path = out_dir / filename
+        out_path = out_dir / f"uber_{date_iso}.pdf"
         if out_path.exists():
-            rows.append({"vendor": VENDOR, "invoice_id": filename.removesuffix(".pdf"),
-                         "amount": amount, "date": date_iso, "pdf_path": str(out_path)})
+            rows.append({"vendor": VENDOR, "invoice_id": date_iso, "amount": amount,
+                         "date": date_iso, "pdf_path": str(out_path)})
             continue
 
+        url = c["href"] if c["href"].startswith("http") else "https://riders.uber.com" + c["href"]
         try:
-            if href:
-                url = href if href.startswith("http") else "https://riders.uber.com" + href
-                page.goto(url, timeout=TIMEOUT_MS)
-            else:
-                link.click()
-            page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_MS)
-            page.wait_for_timeout(2000)
+            page.goto(url, timeout=TIMEOUT_MS, wait_until="domcontentloaded")
+            page.wait_for_timeout(4000)
             dismiss_popups(page)
-
-            ok = download_or_screenshot(ctx, page,
-                                        lambda: page.click('a:has-text("Download"), button:has-text("Download")'),
-                                        out_path)
-            if not ok:
-                ok = render_page_to_pdf(page, out_path)
-
-            if ok:
-                print(f"  ✓ {filename}", file=sys.stderr)
-                rows.append({"vendor": VENDOR, "invoice_id": filename.removesuffix(".pdf"),
-                             "amount": amount, "date": date_iso, "pdf_path": str(out_path)})
-            else:
-                print(f"  ✗ {date_iso} {amount:.2f}", file=sys.stderr)
-
-            page.go_back(timeout=TIMEOUT_MS)
-            page.wait_for_timeout(1200)
+            with page.expect_download(timeout=20_000) as di:
+                page.click(_DL_SELECTOR)
+            di.value.save_as(str(out_path))
+            ok = out_path.exists() and out_path.stat().st_size > 500
         except Exception as exc:
-            print(f"  ✗ {date_iso} {amount:.2f} : {exc}", file=sys.stderr)
+            print(f"  ⚠ {date_iso} : {exc}", file=sys.stderr)
+            ok = False
+
+        if ok:
+            print(f"  ✓ uber_{date_iso}.pdf  {amount:.2f}€", file=sys.stderr)
+            rows.append({"vendor": VENDOR, "invoice_id": date_iso, "amount": amount,
+                         "date": date_iso, "pdf_path": str(out_path)})
+        else:
+            print(f"  ✗ {date_iso} {amount:.2f}€", file=sys.stderr)
 
     return rows
 
 
+_EN_MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+              "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+
+
 def _extract_date(text: str) -> str:
-    months = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
-               "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
-    m = re.search(
-        r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2}),?\s+(\d{4})\b',
-        text
-    )
+    # Uber liste « May 23 • 11:24 PM » (sans année) → on infère l'année (≤ aujourd'hui).
+    m = re.search(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})\b', text)
     if m:
-        mo = months.get(m.group(1), 0)
-        if mo:
-            return f"{m.group(3)}-{mo:02d}-{int(m.group(2)):02d}"
+        import datetime
+        mo = _EN_MONTHS[m.group(1).lower()]
+        day = int(m.group(2))
+        today = datetime.date.today()
+        year = today.year
+        try:
+            if datetime.date(year, mo, day) > today:
+                year -= 1
+        except ValueError:
+            pass
+        return f"{year:04d}-{mo:02d}-{day:02d}"
     m2 = re.search(r'\b(\d{4})-(\d{2})-(\d{2})\b', text)
     return m2.group(0) if m2 else ""
 

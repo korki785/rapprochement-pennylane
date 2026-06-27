@@ -19,3 +19,4 @@ Transavia,transavia.com,TRANSAVIA,1,Billets avion. Confirmation PDF.
 AirFrance,airfrance|aa.com|americanairlines,AIR FRANCE|AMERICAN AIRLINES,1,Billets avion.
 SNCF,sncf,SNCF VOYAGEURS|SNCF,1,Billets train (souvent au nom du passager, pas la société).
 Lovable,lovable.dev|lovable.app,LOVABLE,1,Abonnement SaaS. Factures sur nael@parishouseofprayer.com (LOVABLE_GMAIL). ~22€/mois.
+Bolt,bolt.eu,BOLT,1,Courses VTC. Reçu HTML (pas de portail web : mobile-only). « Récapitulatif de votre course » -> render HTML->PDF.

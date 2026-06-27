@@ -118,7 +118,8 @@ def looks_like_invoice(text: str) -> bool:
 
 # Domaines d'expéditeurs qui envoient le reçu en HTML dans le corps (zéro PJ).
 HTML_RECEIPT_DOMAINS = ("squareup.com", "messaging.squareup.com", "sundayapp.io",
-                        "toasttab.com", "clover.com", "sumup.com")
+                        "toasttab.com", "clover.com", "sumup.com",
+                        "bolt.eu", "receipts-france@bolt.eu")
 _CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 
@@ -134,16 +135,30 @@ class ParsedReceipt:
     vendor: str            # nom marchand lu dans le reçu (ex. « CERTIFIED CAFE »)
 
 
+_FR_MONTHS_FULL = {"janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4,
+                   "mai": 5, "juin": 6, "juillet": 7, "août": 8, "aout": 8,
+                   "septembre": 9, "octobre": 10, "novembre": 11, "décembre": 12,
+                   "decembre": 12}
+
+
 def parse_html_receipt(text: str, subject: str) -> ParsedReceipt:
     """Extrait montant + date + marchand d'un reçu HTML (corps texte + sujet).
 
-    Gère le format Square FR (« Vous avez payé 9,00 € à CERTIFIED CAFE … le 10/6/2026 »)
-    et anglais (« You paid … at … on … »). Replis génériques sinon.
+    Gère Square FR (« Vous avez payé 9,00 € à CERTIFIED CAFE … le 10/6/2026 »), anglais
+    (« You paid … at … on … ») et Bolt (« Montant facturé 69,90 € », « 11 mai 2026 »).
     """
+    # Si on reçoit du HTML brut (pas de partie texte), on retire les balises.
+    if "<" in text and ">" in text:
+        import html as _html
+        text = _html.unescape(re.sub(r"<[^>]+>", " ", text))
+        text = re.sub(r"\s+", " ", text)
+
     amount: Optional[float] = None
-    for pat in (r"pay[ée]\w*\s+([\d  ]{1,12}[.,]\d{2})\s*[€$]",
+    for pat in (r"montant\s+factur[ée]\s+([\d  ]{1,12}[.,]\d{2})\s*[€$]",  # Bolt : net débité
+                r"pay[ée]\w*\s+([\d  ]{1,12}[.,]\d{2})\s*[€$]",
                 r"re[çc]u\s+de\s+([\d  ]{1,12}[.,]\d{2})\s*[€$]",
-                r"\bpaid\s+[€$]?\s*([\d,]{1,12}\.\d{2})\b"):
+                r"\bpaid\s+[€$]?\s*([\d,]{1,12}\.\d{2})\b",
+                r"\btotal\s*:?\s*([\d  ]{1,12}[.,]\d{2})\s*[€$]"):
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             amount = _to_float(m.group(1))
@@ -155,6 +170,11 @@ def parse_html_receipt(text: str, subject: str) -> ParsedReceipt:
     m = re.search(r"\ble\s+(\d{1,2})/(\d{1,2})/(\d{4})", text, re.IGNORECASE)
     if m:
         date = f"{int(m.group(3)):04d}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+    if date is None:
+        # Date FR en toutes lettres (Bolt : « lundi, 11 mai 2026 »).
+        m = re.search(r"(\d{1,2})\s+([A-Za-zéûàç]+)\s+(\d{4})", text)
+        if m and m.group(2).lower() in _FR_MONTHS_FULL:
+            date = f"{int(m.group(3)):04d}-{_FR_MONTHS_FULL[m.group(2).lower()]:02d}-{int(m.group(1)):02d}"
     if date is None:
         date = extract_date(text)
 
