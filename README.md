@@ -1,10 +1,12 @@
 # Rapprochement justificatifs → Qonto
 
-Trois flux automatisés de rapprochement justificatif → transaction Qonto :
+Cinq flux automatisés de rapprochement justificatif → transaction Qonto :
 
 1. **Dépenses USD** par carte (reçus Gmail pro → justificatif PDF).
 2. **UberEats** (reçus Gmail perso → virements de remboursement Qonto) — *continu, ≈ à chaque mail*.
 3. **Factures fournisseurs** (Google Drive, OCR) → carte/virement/devise — *continu, ≈ à chaque upload, + email hebdo des non-rapprochés*.
+4. **Factures & reçus par email** (SaaS : Anthropic, Aircall, Square, etc.) — *continu, ≈ à chaque mail*.
+5. **Portails vendeurs** (Wix, Notion, OpenAI, Hunter, etc.) — *continu, ≈ toutes les 15 min*.
 
 Les flux 2 et 3 tournent en continu via des pollers launchd (toutes les 15 min) ; le flux 3 envoie un rapport email chaque lundi des justificatifs non rapprochés.
 
@@ -276,7 +278,133 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.saas-w
 
 ---
 
+## Flux 5 — Portails vendeurs (Playwright)
+
+Détecte les transactions Qonto sans PJ → scrape les portails de facturation (Wix, Notion, OpenAI, Hunter…) via Playwright → télécharge le PDF → attache à Qonto.
+
+### Vendeurs supportés
+
+| Vendeur | Endpoint | Login | Notes |
+|---------|----------|-------|-------|
+| Wix | manage.wix.com/account/billing-history | email/password | Historique de facturation (data-hook invoice-number) |
+| Notion | app.notion.com → Paramètres → Facturation | email/SSO | Modal settingsréelle, View invoice → render PDF |
+| OpenAI/ChatGPT | chatgpt.com → Paramètres → Facturation | (real Chrome CDP) | Contourne Cloudflare via port 9222 |
+| Hunter | hunter.io/account/billing | email/password | Clean billing page |
+| Hostinger | hpanel.hostinger.com/billing | email/password | Renouvellements domaine+hosting |
+| QR-Code-Generator | qr-code-generator.com/account/ | email/password | Annuel ou ponctuel |
+| Bouygues | bouyguestelecom.fr/mon-compte | email/password | Portail FR, timeouts longs |
+| Airbnb | airbnb.com/trips | email/password | Probablement Cloudflare → fallback manuel |
+| Turo | turo.com/us/en/trips/ | email/password | Location voiture, likely Cloudflare |
+| Bolt | bolt.eu/en/profile/trips | phone/OTP | Courses, 2FA SMS → `--init-session` obligatoire |
+| Uber Rides | riders.uber.com/trips | email/Google | Courses (differ from UberEats) |
+
+### Workflow (orchestré par `scripts/run_portals.py`)
+
+1. **Détection** — `portals.detect_unreconciled()` → transactions Qonto `attachment_required=true`, `attachment_ids=[]`
+2. **Scraping** — par vendeur :
+   - Playwright headless + session persistence (`.{vendor}_session.json`)
+   - Auto-detect login (scrute `_is_logged_in()`, pas de stdin)
+   - Navigue → facturation → boucle factures → télécharge PDF
+   - Sauvegarde session pour rapprochements futurs
+3. **Rapprochement** — `reconcile_portals.py` :
+   - Montant ± 0,01 EUR (ou `local_amount` devise)
+   - Date ± 10 jours
+   - Alias marchand ∈ libellé Qonto → `confidence=exact` (auto-attache)
+4. **Attachement** — `upload_attachment` (skip si PJ déjà présente)
+5. **Marquer** — `processed.json` (idempotent)
+
+### Setup (une seule fois)
+
+```bash
+# .env : credentials par vendeur
+OPENAI_EMAIL=...  OPENAI_PASSWORD=...
+NOTION_EMAIL=...  NOTION_PASSWORD=...
+WIX_EMAIL=...     WIX_PASSWORD=...
+HUNTER_EMAIL=...  HUNTER_PASSWORD=...
+HOSTINGER_EMAIL=... HOSTINGER_PASSWORD=...
+BOLT_PHONE=+33... BOLT_PASSWORD=...
+# ... etc
+
+# Init sessions (headed, supervision 2FA/OTP)
+python3 scripts/portals/fetch_openai.py --init-session
+python3 scripts/portals/fetch_notion.py --init-session
+python3 scripts/portals/fetch_wix.py --init-session
+# ... repeat per vendor
+
+# Cas special : OpenAI/ChatGPT (Cloudflare)
+# Lancer Chrome debug AVANT les fetchers
+open -na "Google Chrome" --args --remote-debugging-port=9222 "--remote-allow-origins=*" \
+  --user-data-dir="$HOME/.chrome-recon-debug" https://chatgpt.com/
+# Log in une seule fois dans cette fenêtre. Session persiste.
+# La laissez vivant (launchd relance si mort).
+```
+
+### Lancer
+
+```bash
+python3 scripts/run_portals.py --since 2026-04-01 --dry-run   # test
+python3 scripts/run_portals.py --since 2026-04-01             # flux complet
+python3 scripts/run_portals.py --vendor openai --dry-run       # seul un vendeur
+```
+
+### Fallback manuel
+
+Pour les portails CAPTCHA-bloqués (Cloudflare) ou trop instables :
+
+1. Téléchargez le PDF à la main → déposez dans `reports/portals/_drop/{vendor}/`
+2. `python3 scripts/ingest_drop.py` → parse, rapproche, attache
+
+### Automatisation launchd
+
+Poller toutes les 15 min (`com.maisondarwish.portals-watch.plist`, `StartInterval=900`) :
+- `portals_has_new.py` → pré-check léger (y a-t-il du nouveau ?)
+- Si oui → `run_portals.py` complet
+
+```bash
+cp scripts/com.maisondarwish.portals-watch.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.portals-watch.plist
+```
+
+### Scripts
+
+| Script | Rôle |
+|--------|------|
+| `src/recon/portals.py` | Core (detect, match, attach) |
+| `scripts/portals/fetch_*.py` (11 files) | Vendeur scrapers (Playwright) |
+| `scripts/reconcile_portals.py` | Rapproche invoices vs Qonto |
+| `scripts/run_portals.py` | Orchestrateur (`--since`, `--vendor`, `--dry-run`) |
+| `scripts/portals_has_new.py` | Pré-check IMAP-léger pour le poller |
+| `scripts/ingest_drop.py` | Fallback manuel (drop-folder) |
+| `scripts/run_portals_watch.sh` | Wrapper du poller 15 min |
+| `src/recon/portal_vendors.csv` | Mapping vendor → qonto_label, env_prefix, billing_url |
+
+### Notes
+
+- **Session Playwright** : stockée dans `.{vendor}_session.json` (gitignored). À renouveler si expirée (`--init-session` à nouveau).
+- **OpenAI/ChatGPT** : uses **Chrome via CDP** (port 9222) pour contourner le CAPTCHA Cloudflare. Nécessite `launch_chatgpt_chrome.sh` qui relance le Chrome dédié s'il meurt.
+- **Pas de fabrication** : seuls les vrais PDFs depuis les portails sont attachés.
+- **Démarrage** : 01/04/2026 (configurable).
+
+---
+
 ## Notes générales
 
 - Pas de fabrication : un justificatif n'est attaché que si un **vrai reçu** existe.
 - Les justificatifs Qonto ne sont pas des copies probantes (`probative_attachment: unavailable`) ; les originaux restent dans Gmail.
+
+---
+
+## Historique récent
+
+**v1.0 (commit 67449fb, 2026-06-27)** — Flux 5 (portails vendeurs) complet
+- Scrapers Playwright pour 11 vendeurs (Wix, Notion, OpenAI, Hunter, Hostinger, QR-Code-Gen, Bouygues, Airbnb, Turo, Bolt, Uber Rides)
+- Contournement CAPTCHA Cloudflare via CDP Chrome (port 9222) pour OpenAI/ChatGPT
+- Fallback manuel (ingest_drop.py) pour les portails CAPTCHA-bloqués
+- Orchestrateur + launchd poller 15 min
+- 12 justificatifs attachés (Wix 6, Notion 3, ChatGPT 3)
+
+**Fluxes antérieurs**
+- Flux 1 : Dépenses USD carte (reçus Gmail Square/Toast → PDF générés)
+- Flux 2 : Remboursements UberEats (Gmail + portail → virements Qonto)
+- Flux 3 : Factures fournisseurs (Google Drive + OCR Vision)
+- Flux 4 : Factures SaaS par email (Gmail PDF + reçus HTML→PDF Chrome)
