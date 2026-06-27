@@ -438,6 +438,10 @@ cp scripts/com.maisondarwish.weekly-recap.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.weekly-recap.plist
 ```
 
+> **Escalade autonome** : le plist doit avoir `claude` dans son `PATH` (sinon → repli alerte).
+> Le binaire est en `~/.local/bin/claude` → la clé `PATH` du plist inclut `/Users/naeldarwish/.local/bin`.
+> Vérifier : `launchctl list | grep weekly-recap`. Recharger après toute modif du plist (bootout + bootstrap).
+
 ### Fichiers
 
 | Fichier | Rôle |
