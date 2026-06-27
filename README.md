@@ -274,6 +274,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.saas-w
 
 - Card-SaaS **sans** facture email (Notion, OpenAI, Hostinger, Wix…) : factures sur portail uniquement → hors périmètre (sprint séparé).
 - Balayage = **INBOX** seulement (un justificatif présent uniquement dans « Envoyés » via transfert auto n'est pas lu).
+- **Formats reconnus** : montants `1 156,41` / `1,156.41` (US) / `1.156,41` ; dates FR + EN (`25 April 2026`).
+- **Justificatif auto-envoyé** : le marchand est lu DANS le PDF (pas seulement l'expéditeur) → un reçu que tu te transfères à toi-même se rapproche quand même (montant + date + marchand croisé au libellé Qonto).
 - Démarre au **01/04/2026**.
 
 ---
@@ -457,6 +459,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.weekly
 ---
 
 ## Historique récent
+
+**v1.3 (2026-06-27)** — Robustesse parsing : formats nombre US/FR/EU + dates EN ; marchand lu dans le PDF (justificatif auto-envoyé rapproché).
 
 **v1.2 (2026-06-27)** — Récap hebdo fiable
 - Récap transaction-centric basé sur la vérité **live Qonto** + vérification adversariale avant envoi
