@@ -1,0 +1,30 @@
+Tu es lancé en mode headless pour FIABILISER le récap hebdo de rapprochement Qonto,
+projet /Users/naeldarwish/rapprochement-pennylane.
+
+CONTEXTE : scripts/audit_unreconciled.py a produit reports/recap/suspects.json — des
+transactions Qonto SANS pièce jointe mais pour lesquelles un justificatif existe
+PROBABLEMENT (champ "found_in" : un PDF local sous reports/*/input, ou un email dans la
+boîte "hello"/"perso"/"parishouse"). Ces justificatifs n'ont pas été attachés
+automatiquement = raté d'automation à corriger.
+
+MISSION, pour CHAQUE item de reports/recap/suspects.json :
+1. Retrouver le justificatif réel via "found_in". Vérifier qu'il correspond VRAIMENT au
+   montant ET à la date de la transaction (pas une simple coïncidence de montant).
+2. S'il correspond → ATTACHER à la transaction (champ "id") : via l'outil MCP Qonto
+   upload_attachment, ou scripts/ingest_drop.py, ou en relançant le flux concerné
+   (run_saas.py / run_ubereats.py / run_portals.py / run_fournisseurs.py). Confirmer
+   ensuite avec MCP Qonto list_transaction_attachments que la PJ est présente.
+   → item RÉSOLU : ne rien ajouter au récap.
+3. Si après vérif il n'y a PAS de vrai justificatif (montant = coïncidence) → ajouter
+   l'item à reports/recap/confirmed.json (= vraiment sans justificatif).
+4. Si tu ne peux PAS trancher avec CERTITUDE (justificatif ambigu / attache impossible)
+   → NE DEVINE PAS : ajouter l'item à reports/recap/needs_review.json.
+
+RÈGLES ABSOLUES :
+- Ne JAMAIS attacher un justificatif dont tu n'es pas certain qu'il correspond à la tx.
+- Idempotent : si la tx a déjà une PJ, ne pas en rajouter.
+- État final : reports/recap/confirmed.json = uniquement les tx vraiment sans justificatif ;
+  reports/recap/needs_review.json = uniquement les cas incertains. JSON = liste d'objets
+  avec au moins {id, label, amount, currency, date}.
+- Sois bref. Ne touche à rien d'autre que l'attachement des justificatifs vérifiés et ces
+  deux fichiers JSON.

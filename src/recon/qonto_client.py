@@ -196,6 +196,45 @@ class QontoClient:
                 })
         return out
 
+    def fetch_unreconciled_expenses(self, since: str) -> List[Dict]:
+        """Débits « à justifier » depuis `since`, AVEC statut PJ LIVE.
+
+        Périmètre (récap fiable) : CB + prélèvements + virements SAUF internes
+        « MAISON DARWISH » ; exclut les frais Qonto. Inclut donc remboursements perso
+        (Nael Darwish) et virements fournisseurs. Conserve `attachment_required` et
+        `attachment_ids` bruts (le champ que `fetch_all_debits` laisse tomber) → vérité
+        terrain, immunisé contre les snapshots périmés.
+        """
+        out: List[Dict] = []
+        for acct in self.list_bank_account_ids():
+            for tx in self.iter_transactions(acct):
+                if tx.get("side") != "debit":
+                    continue
+                settled = str(tx.get("settled_at") or tx.get("emitted_at") or "")[:10]
+                if settled and settled < since:
+                    continue
+                op = str(tx.get("operation_type") or "")
+                label = str(tx.get("label") or "")
+                if op == "qonto_fee":
+                    continue
+                if op == "transfer" and "maison darwish" in label.lower():
+                    continue  # mouvement interne / dirigeant — pas un justificatif requis
+                if op not in ("card", "direct_debit", "transfer"):
+                    continue
+                out.append({
+                    "id": str(tx.get("id") or tx.get("transaction_id") or ""),
+                    "label": label,
+                    "amount": tx.get("amount"),
+                    "currency": tx.get("currency") or "EUR",
+                    "local_amount": tx.get("local_amount"),
+                    "local_currency": tx.get("local_currency") or "",
+                    "settled_at": settled,
+                    "operation_type": op,
+                    "attachment_required": bool(tx.get("attachment_required")),
+                    "attachment_ids": tx.get("attachment_ids") or [],
+                })
+        return out
+
     # -- Pièces jointes -----------------------------------------------------
     def get_transaction_attachments(self, transaction_id: str) -> List[Dict]:
         """Liste les pièces jointes d'une transaction (vide si aucune).
