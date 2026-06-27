@@ -81,12 +81,19 @@ def _amount_targets(cand: dict) -> list:
 
 
 def _amount_strings(targets: list) -> list:
+    """Variantes textuelles d'un montant, séparateurs de milliers inclus (US/FR)."""
     out = []
     for t in targets:
         s = f"{t:.2f}"
-        out.append(s)
-        out.append(s.replace(".", ","))
-    return out
+        out.append(s)                        # 1156.41
+        out.append(s.replace(".", ","))      # 1156,41
+        intp, dec = s.split(".")
+        if len(intp) > 3:
+            us = f"{int(intp):,}.{dec}"                       # 1,156.41
+            fr = us.replace(",", " ").replace(".", ",")       # 1 156,41
+            out.append(us)
+            out.append(fr)
+    return list(dict.fromkeys(out))
 
 
 # Montant considéré comme un VRAI total payé s'il est proche d'un de ces mots-clés

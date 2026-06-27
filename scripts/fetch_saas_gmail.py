@@ -249,6 +249,9 @@ def _sweep_mailbox(mail: imaplib.IMAP4_SSL, out_dir: Path, since: str,
         primary, pp = _pick_primary(usable)
         aliases = list(vendor.aliases) if vendor else []
         aliases += saas.sender_aliases(from_hdr)
+        # Marchand lu DANS le corps du PDF (ex. reçu Airbnb auto-transféré : expéditeur =
+        # soi-même, donc aucun alias marchand sans ça → non rapproché malgré montant exact).
+        aliases += saas.vendor_aliases_from_text(saas.extract_text(primary), vendors)
         seen = set()
         aliases = [a for a in aliases if not (a in seen or seen.add(a))]
 

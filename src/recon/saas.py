@@ -114,6 +114,27 @@ def looks_like_invoice(text: str) -> bool:
     return any(w in t for w in _INVOICE_WORDS)
 
 
+def vendor_aliases_from_text(text: str, vendors: List[SaasVendor]) -> List[str]:
+    """Alias des fournisseurs connus DÉTECTÉS dans le corps d'un justificatif.
+
+    Permet de rapprocher un reçu auto-transféré (expéditeur = soi-même, nom de fichier
+    quelconque) : le marchand (« Airbnb », « Uber »…) est lu DANS le PDF → alias → croisé
+    au libellé Qonto. Sans ça, un justificatif qu'on s'envoie à soi n'a aucun alias marchand.
+    """
+    if not text:
+        return []
+    t = strip_accents(text).upper()
+    out: List[str] = []
+    for v in vendors:
+        name_u = strip_accents(v.name).upper()
+        domain_core = [strip_accents(d.split(".")[0]).upper() for d in v.domains
+                       if len(d.split(".")[0]) >= 4]
+        if name_u in t or any(c in t for c in domain_core) or any(a in t for a in v.aliases):
+            out.extend(v.aliases or [name_u])
+    seen: set = set()
+    return [a for a in out if not (a in seen or seen.add(a))]
+
+
 # --- Reçus HTML (Square/Sunday/Toast/Clover : pas de PDF joint) -------------- #
 
 # Domaines d'expéditeurs qui envoient le reçu en HTML dans le corps (zéro PJ).
@@ -229,7 +250,13 @@ def has_company_id(text: str) -> bool:
 
 # --- Extraction du contenu PDF --------------------------------------------- #
 
-_MONEY = r"(?<![\d.,])(\d{1,3}(?:[  ]\d{3})*(?:[.,]\d{2})|\d+[.,]\d{2})(?![\d])"
+# Gère les séparateurs de milliers : espace (FR « 1 156,41 »), virgule (US « 1,156.41 »),
+# point (EU « 1.156,41 »). _to_float lève ensuite l'ambiguïté virgule/point.
+_THSEP = r"   .,"
+_MONEY = (r"(?<![\d.,])("
+          r"\d{1,3}(?:[" + _THSEP + r"]\d{3})+[.,]\d{2}"   # avec séparateurs de milliers
+          r"|\d+[.,]\d{2}"                                  # simple
+          r")(?![\d])")
 # Du plus spécifique (montant réellement dû) au plus générique. « T.T.C » toléré pointé.
 _TOTAL_LABELS = (
     r"amount\s+paid", r"montant\s+(?:total\s+)?(?:pay[ée]|pr[ée]lev[ée])",
@@ -304,9 +331,10 @@ def extract_date(text: str) -> Optional[str]:
         mo = _EN_MONTHS.get(m.group(1).lower()[:3])
         if mo:
             return f"{int(m.group(3)):04d}-{mo:02d}-{int(m.group(2)):02d}"
-    m = re.search(r"\b(\d{1,2})\s+([A-Za-zÀ-ÿ]{3,10})\s+(20\d{2})\b", text)
+    m = re.search(r"\b(\d{1,2})\s+([A-Za-zÀ-ÿ]{3,10})\.?\s+(20\d{2})\b", text)
     if m:
-        mo = _FR_MONTHS.get(m.group(2).lower())
+        # « 25 avril 2026 » (FR) ou « 25 April 2026 » (EN, mois complet ou abrégé).
+        mo = _FR_MONTHS.get(m.group(2).lower()) or _EN_MONTHS.get(m.group(2).lower()[:3])
         if mo:
             return f"{int(m.group(3)):04d}-{mo:02d}-{int(m.group(1)):02d}"
     m = re.search(r"\b(\d{1,2})[/.](\d{1,2})[/.](20\d{2})\b", text)
