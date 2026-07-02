@@ -96,11 +96,12 @@ def main() -> int:
     # --- 3/5 Rapprochement ---
     print("\n=== 3/5 Rapprochement ===", file=sys.stderr)
     matches, unmatched = recon.match(list(manifest.values()), debits,
-                                     recon.DEFAULT_WARN_DAYS, recon.DEFAULT_WINDOW_DAYS)
+                                     recon.DEFAULT_WARN_DAYS, recon.DEFAULT_WINDOW_DAYS,
+                                     recon.UNIQUE_WINDOW_DAYS)
     recon.write_matches_json(matches, out_dir / "matches.json")
     recon.write_unreconciled_json(unmatched, out_dir / "unreconciled.json")
     recon.write_report(matches, unmatched, out_dir / f"reconciliation_{datetime.now():%Y-%m-%d}.md")
-    exact = [m for m in matches if m.confidence == "exact"]
+    exact = [m for m in matches if m.confidence in recon.AUTO_ATTACH]
     print(f"{len(matches)} rapprochée(s) ({len(exact)} fiable(s)), {len(unmatched)} non rapprochée(s).",
           file=sys.stderr)
 
@@ -110,10 +111,16 @@ def main() -> int:
 
     # --- 4/5 Attache sur Qonto (exact seulement) ---
     print("\n=== 4/5 Attachement sur Qonto ===", file=sys.stderr)
-    warn = [m for m in matches if m.confidence != "exact"]
+    warn = [m for m in matches if m.confidence not in recon.AUTO_ATTACH]
     for m in warn:
         print(f"  ⚠ {m.invoice.get('vendor')} {Path(m.invoice.get('primary_pdf','')).name} "
               f"-> {m.debit.get('label')} {m.debit.get('settled_at')} (à confirmer, non attaché)",
+              file=sys.stderr)
+    # Auto-attaches SANS lien de nom (montant unique) : tracés distinctement pour l'audit humain.
+    for m in (m for m in exact if m.confidence == "exact_unique"):
+        print(f"  🟢 {m.invoice.get('vendor')} {Path(m.invoice.get('primary_pdf','')).name} "
+              f"-> {m.debit.get('label')} {m.debit.get('settled_at')} "
+              f"(montant unique {m.invoice.get('amount')}, SANS nom -> auto-attaché)",
               file=sys.stderr)
 
     attached_msgids: set = set()

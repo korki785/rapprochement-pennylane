@@ -38,6 +38,18 @@ DEFAULT_WARN_DAYS = 10      # écart facture↔règlement encore considéré « 
 DEFAULT_WINDOW_DAYS = 15    # fenêtre max de recherche d'un candidat
 MERGE_WINDOW_DAYS = 12      # facture + reçu de paiement du MÊME débit (Aircall) -> fusion
 
+# --- Auto-attache SANS lien de nom : montant+date unique -------------------------------- #
+UNIQUE_WINDOW_DAYS = 5                     # fenêtre serrée pour la voie « montant unique »
+AUTO_ATTACH = {"exact", "exact_unique"}    # confiances que run_saas peut attacher
+
+
+def _is_round_amount(a: Optional[float]) -> bool:
+    """Montant « rond » (…,00 ET multiple de 10) = fort risque de collision (abonnements,
+    virements ronds). Sur ces montants on n'auto-attache PAS sans lien de nom -> « warn »."""
+    if a is None:
+        return False
+    return abs(a - round(a)) < 1e-9 and int(round(a)) % 10 == 0
+
 
 def _days_between(d1: str, d2: str) -> Optional[int]:
     try:
@@ -46,6 +58,17 @@ def _days_between(d1: str, d2: str) -> Optional[int]:
     except (ValueError, TypeError):
         return None
     return abs((a - b).days)
+
+
+def _days_signed(d_inv: str, d_tx: str) -> Optional[int]:
+    """(date débit − date facture) en jours. ≥0 => débit le jour de la facture ou APRÈS
+    (un vrai paiement ne précède pas sa facture ; ne tolère qu'une petite marge d'autorisation)."""
+    try:
+        a = date.fromisoformat(d_inv[:10])
+        b = date.fromisoformat(d_tx[:10])
+    except (ValueError, TypeError):
+        return None
+    return (b - a).days
 
 
 def _amount_close(a: Optional[float], b: Optional[float]) -> bool:
@@ -135,7 +158,9 @@ def merge_duplicates(invoices: List[Dict]) -> List[Dict]:
 
 
 def match(invoices: List[Dict], debits: List[Dict],
-          warn_days: int, window_days: int) -> tuple[List[Match], List[Dict]]:
+          warn_days: int, window_days: int,
+          unique_window_days: int = UNIQUE_WINDOW_DAYS,
+          confirm_unique: bool = False) -> tuple[List[Match], List[Dict]]:
     """Rapproche les factures aux débits. Renvoie (matches, factures_non_rapprochées)."""
     invoices = merge_duplicates(invoices)
     used: set = set()
@@ -178,16 +203,40 @@ def match(invoices: List[Dict], debits: List[Dict],
             named.sort(key=lambda c: c[1])           # date la plus proche
             t, gap, matched_on, alias_ok = named[0]
             confidence = "exact" if gap <= warn_days else "warn"
-        elif inv.get("company_id"):
-            # Vraie facture « Maison Darwish » mais aucun libellé ne matche le nom :
-            # bon montant possible sur le mauvais marchand -> à confirmer (jamais auto-attaché).
-            candidates.sort(key=lambda c: c[1])
-            t, gap, matched_on, alias_ok = candidates[0]
-            confidence = "warn"
         else:
-            # Ni lien de nom, ni identité société -> on ne devine pas.
-            unmatched.append({**inv, "_reason": "montant/date trouvés mais ni nom ni identité société ne correspondent"})
-            continue
+            # Aucun lien de nom dans AUCUN libellé candidat -> on se rabat sur l'UNICITÉ :
+            # un montant+date unique dans une fenêtre serrée = rapprochement non ambigu, sans nom.
+            tight = [c for c in candidates
+                     if c[1] <= unique_window_days
+                     and (_days_signed(inv_date, c[0].get("settled_at") or "") or 0) >= -2]
+            tight_ids = {c[0].get("id") for c in tight}
+            # Identité EXIGÉE = facture adressée à la société (company_id) ou fournisseur de
+            # confiance (trusted). PAS `aliases` : ce sont des jetons incidents (« QONTO » lu
+            # dans un doc de litige, nom de la personne, plateforme « TOASTTAB »…) — les inclure
+            # laisserait un PDF quelconque s'auto-attacher au premier débit du même montant.
+            identified = bool(inv.get("company_id") or inv.get("trusted"))
+
+            if identified and len(tight_ids) == 1 and not _is_round_amount(amount) \
+                    and not confirm_unique:
+                # Un SEUL débit possible, montant « spécifique » (non rond), facture identifiée
+                # (adressée à la société) -> auto-attache SANS lien de nom.
+                # RISQUE RÉSIDUEL assumé : si le vrai débit est absent (payé autrement) et qu'un
+                # unique débit du même montant coïncide dans la fenêtre, on se trompe de marchand.
+                # Atténué par : montant non rond + fenêtre 5 j + débit non antérieur à la facture.
+                t, gap, matched_on, alias_ok = tight[0]
+                confidence = "exact_unique"
+            elif inv.get("company_id") or (identified and len(tight_ids) >= 1):
+                # Facture société sans unique-spécifique, OU montant rond, OU ≥2 candidats
+                # (ambigu), OU --confirm-unique : bon montant possible sur le mauvais marchand
+                # -> à confirmer, jamais auto-attaché.
+                candidates.sort(key=lambda c: c[1])
+                t, gap, matched_on, alias_ok = candidates[0]
+                confidence = "warn"
+            else:
+                # Ni nom, ni identité, ni candidat unique spécifique -> on ne devine pas.
+                unmatched.append({**inv, "_reason":
+                    "montant/date trouvés mais ni nom, ni identité, ni candidat unique spécifique"})
+                continue
 
         used.add(t.get("id"))
         matches.append(Match(inv, t, confidence, gap, matched_on, alias_ok))
@@ -240,8 +289,8 @@ def write_unreconciled_json(unmatched: List[Dict], path: Path) -> None:
 
 
 def write_report(matches: List[Match], unmatched: List[Dict], path: Path) -> None:
-    exact = [m for m in matches if m.confidence == "exact"]
-    warn = [m for m in matches if m.confidence != "exact"]
+    exact = [m for m in matches if m.confidence in AUTO_ATTACH]
+    warn = [m for m in matches if m.confidence not in AUTO_ATTACH]
     lines = [
         "# Rapprochement SaaS",
         "",
@@ -254,7 +303,7 @@ def write_report(matches: List[Match], unmatched: List[Dict], path: Path) -> Non
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for m in matches:
-        flag = "✅ exact" if m.confidence == "exact" else "⚠️ warn"
+        flag = {"exact": "✅ exact", "exact_unique": "🟢 exact_unique"}.get(m.confidence, "⚠️ warn")
         lines.append(
             f"| {m.invoice.get('vendor','')} | {Path(m.invoice.get('primary_pdf','')).name} "
             f"| {m.invoice.get('amount')} | {m.invoice.get('currency')} | {m.invoice.get('date')} "
@@ -279,6 +328,10 @@ def main() -> int:
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--warn-days", type=int, default=DEFAULT_WARN_DAYS)
     parser.add_argument("--window-days", type=int, default=DEFAULT_WINDOW_DAYS)
+    parser.add_argument("--unique-window-days", type=int, default=UNIQUE_WINDOW_DAYS,
+                        help="Fenêtre serrée pour l'auto-attache sans nom (montant unique). 0 = désactive.")
+    parser.add_argument("--confirm-unique", action="store_true",
+                        help="Ne PAS auto-attacher les montants uniques sans nom : les laisser en « warn ».")
     args = parser.parse_args()
 
     manifest_path = Path(args.manifest)
@@ -288,7 +341,8 @@ def main() -> int:
         invoices = list(data.values()) if isinstance(data, dict) else list(data)
     debits = json.loads(Path(args.transactions).read_text(encoding="utf-8"))
 
-    matches, unmatched = match(invoices, debits, args.warn_days, args.window_days)
+    matches, unmatched = match(invoices, debits, args.warn_days, args.window_days,
+                               args.unique_window_days, args.confirm_unique)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -296,7 +350,7 @@ def main() -> int:
     write_unreconciled_json(unmatched, out_dir / "unreconciled.json")
     write_report(matches, unmatched, out_dir / f"reconciliation_{date.today().isoformat()}.md")
 
-    exact = sum(1 for m in matches if m.confidence == "exact")
+    exact = sum(1 for m in matches if m.confidence in AUTO_ATTACH)
     print(f"{len(matches)} rapprochée(s) ({exact} fiable(s)), {len(unmatched)} non rapprochée(s).",
           file=sys.stderr)
     return 0
