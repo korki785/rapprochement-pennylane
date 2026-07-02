@@ -22,3 +22,4 @@ Lovable,lovable.dev|lovable.app,LOVABLE,1,Abonnement SaaS. Factures sur nael@par
 Bolt,bolt.eu,BOLT,1,Courses VTC. Reçu HTML (pas de portail web : mobile-only). « Récapitulatif de votre course » -> render HTML->PDF.
 Airbnb,airbnb,AIRBNB,1,"Réservations voyage. Reçu « Your receipt from Airbnb », souvent auto-transféré à hello@. Montant format US (1,156.41)."
 Villa Duflot,villa-duflot.com|d-edge.com,VILLA DUFLOT|DUFLOT,1,"Hôtel & Spa Perpignan. Facture d'acompte séjour (acompte 30%). Reçu via d-edge (no-reply@d-edge.com). Date FR DD.MM.YY."
+Uber,uber.com,UBER,1,"Courses VTC Uber (reçu « merci d'avoir utilisé Uber », souvent transféré par le passager). Distinct d'UberEats (flux 2). Libellé Qonto « UBR* …UBER.COM »."
