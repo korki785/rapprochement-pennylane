@@ -295,12 +295,13 @@ Détecte les transactions Qonto sans PJ → scrape les portails de facturation (
 | Notion | app.notion.com → Paramètres → Facturation | email/SSO | ✅ Modal Settings réelle, View invoice → render PDF |
 | OpenAI/ChatGPT | chatgpt.com → Paramètres → Facturation | (real Chrome CDP) | ✅ Contourne Cloudflare via CDP port 9222 → Stripe |
 | Uber Rides | riders.uber.com/trips | email/Google (= UberEats) | ✅ Course → Details → « Download Invoice ». Date sans année (infère ≤ today) |
-| Hunter | hunter.io/account/billing | email/password | ⏳ À faire (billing page probablement clean) |
-| Hostinger | hpanel.hostinger.com/billing | email/password | ⏳ À faire (renouvellements domaine+hosting) |
-| QR-Code-Generator | qr-code-generator.com/account/ | email/password | ⏳ À faire (annuel ou ponctuel) |
+| Hunter | hunter.io/**users/sign_in** → **/subscriptions** | (real Chrome CDP) | ✅ Cloudflare Turnstile → CDP ; factures **Stripe** (« Télécharger la facture »). Anciennes URLs `/sign-in`, `/account/billing` = **404** |
+| Kandbaz | my.kandbaz.com → **/mes-factures** | email/password + **2FA email** | ✅ login auto, **code 2FA alphanum lu automatiquement dans Gmail** (hello@) ; factures = **mêmes que par email** (fallback) ; DL PDF bloqué par pop-up conformité LCB-FT |
+| Hostinger | hpanel.hostinger.com/billing | email/password | ⏳ Abandonné (facturé par email) |
+| QR-Code-Generator | qr-code-generator.com/account/ | email/password | ⏳ Abandonné |
 | Bouygues | bouyguestelecom.fr/mon-compte | email/password | ⏳ À faire (portail FR, timeouts longs) |
-| Airbnb | airbnb.com/trips | email/password | ⏳ À faire (probablement Cloudflare → technique CDP) |
-| Turo | turo.com/us/en/trips/ | email/password | ⏳ À faire (location voiture, probablement Cloudflare) |
+| Airbnb | airbnb.com/trips | email/password | ✅ CDP printToPDF (page réservation, code = libellé Qonto) |
+| Turo | turo.com/us/en/trips/ | email/password | ⏳ Abandonné (Cloudflare) |
 | ~~Bolt~~ | — | — | ❌ PAS de portail web (mobile-only). Reçus HTML par email → **flux SAAS** (`bolt.eu`) |
 
 > **Uber « PENDING »** : un débit `UBR* PENDING.UBER.COM` est une pré-autorisation. Tant qu'Uber n'a pas
@@ -390,7 +391,9 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.portal
 ### Notes
 
 - **Session Playwright** : stockée dans `.{vendor}_session.json` (gitignored). À renouveler si expirée (`--init-session` à nouveau).
-- **OpenAI/ChatGPT** : uses **Chrome via CDP** (port 9222) pour contourner le CAPTCHA Cloudflare. Nécessite `launch_chatgpt_chrome.sh` qui relance le Chrome dédié s'il meurt.
+- **OpenAI/ChatGPT & Hunter** : **Chrome via CDP** (port 9222) pour contourner Cloudflare. Nécessite `launch_chatgpt_chrome.sh` qui relance le Chrome dédié s'il meurt.
+- ⚠️ **Panne CDP Chrome 149** (2026-07-02) : `connect_over_cdp` échoue `Browser.setDownloadBehavior: context management not supported` → la méthode « vrai Chrome debug » (OpenAI/Hunter) est **cassée** tant que Playwright/Chrome ne sont pas réalignés. Les portails **sans Cloudflare** (Kandbaz…) restent OK en Playwright headless normal.
+- **Kandbaz — 2FA email auto** : le code (alphanumérique 6 car., « Votre code : XXXXXX », valable 10 min) est lu **automatiquement** dans Gmail hello@ (IMAP) et saisi dans les 6 cases → connexion sans intervention. Session réutilisée ensuite.
 - **Pas de fabrication** : seuls les vrais PDFs depuis les portails sont attachés.
 - **Démarrage** : 01/04/2026 (configurable).
 
@@ -534,6 +537,17 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.weekly
 ---
 
 ## Historique récent
+
+**v1.6 (2026-07-02)** — Portails : Hunter + Kandbaz, poller réparé
+- **Hunter** ✅ : URLs déplacées (`/sign-in`, `/account/billing` = 404) → `/users/sign_in` +
+  `/subscriptions` ; Cloudflare Turnstile → **CDP** ; factures **Stripe**. 2 factures attachées.
+- **Kandbaz** (`fetch_kandbaz.py`) : login portail + **2FA email lue automatiquement dans Gmail**
+  (code alphanum 6 car.). Factures `/mes-factures` = mêmes que par email (fallback) ; DL bloqué par
+  pop-up conformité LCB-FT. Kandbaz rapproché 5/6 (options 3€ = lignes de facture attachées à la main).
+- **Poller portails réparé** : chemin `~/Library/Python/3.9` mort → repli `/usr/bin/python3` dans
+  `run_portals_watch.sh` (le watcher mourait avant de lancer `run_portals`).
+- ⚠️ **Panne CDP Chrome 149** : `connect_over_cdp` cassé (`setDownloadBehavior`) → méthode vrai-Chrome
+  (OpenAI/Hunter) HS temporairement ; portails sans Cloudflare OK en headless.
 
 **v1.5 (2026-07-02)** — Flux 6 + robustesse rapprochement
 - **Flux 6 — piloté par la transaction** (`reconcile_qonto.py`) : part d'une tx Qonto sans PJ,
