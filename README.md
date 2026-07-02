@@ -1,12 +1,13 @@
 # Rapprochement justificatifs → Qonto
 
-Cinq flux automatisés de rapprochement justificatif → transaction Qonto :
+Six flux automatisés de rapprochement justificatif → transaction Qonto :
 
 1. **Dépenses USD** par carte (reçus Gmail pro → justificatif PDF).
 2. **UberEats** (reçus Gmail perso → virements de remboursement Qonto) — *continu, ≈ à chaque mail*.
 3. **Factures fournisseurs** (Google Drive, OCR) → carte/virement/devise — *continu, ≈ à chaque upload, + email hebdo des non-rapprochés*.
 4. **Factures & reçus par email** (SaaS : Anthropic, Aircall, Square, etc.) — *continu, ≈ à chaque mail*.
 5. **Portails vendeurs** (Wix, Notion, OpenAI, Hunter, etc.) — *continu, ≈ toutes les 15 min*.
+6. **Piloté par la transaction** (part d'une tx Qonto sans PJ → cherche le reçu dans Gmail par *nom du libellé + montant* → attache, **sans liste blanche de fournisseurs**) — *≈ horaire*.
 
 Les flux 2 et 3 tournent en continu via des pollers launchd (toutes les 15 min) ; le flux 3 envoie un rapport email chaque lundi des justificatifs non rapprochés.
 
@@ -395,6 +396,73 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.portal
 
 ---
 
+## Flux 6 — Rapprochement piloté par la transaction
+
+Sens **inverse** du flux SaaS (qui balaie les emails puis cherche un débit). Ici on part de
+**chaque transaction Qonto sans justificatif** et on utilise SON PROPRE libellé (= le nom du
+marchand) + son montant pour retrouver le reçu dans Gmail, le vérifier, puis l'attacher. **Aucun
+fournisseur n'a besoin d'être pré-enregistré** (`saas_senders.csv`) : le nom vient du libellé.
+
+### Workflow (orchestré par `scripts/reconcile_qonto.py`)
+
+1. **Périmètre** — `QontoClient.fetch_unreconciled_expenses` (CB + prélèvements + virements perso,
+   hors frais Qonto et internes « Maison Darwish »). Saut idempotent si la tx a déjà une PJ.
+2. **Nom marchand du libellé** — `normalize.label_merchant_tokens` : nettoie le libellé et retire
+   les préfixes d'intermédiaire de paiement (`SQ *`, `TST*`, `SUMUP *`, `UBR*`, `GC RE`…).
+   Ex. `UBR* PENDING.UBER.COM` → `UBER` ; `GC RE AIRCALL` → `AIRCALL`.
+3. **Recherche Gmail** — X-GM-RAW `(montant) ET (nom marchand) ET fenêtre ±10 j`, sur toutes les
+   boîtes (hello/perso/parishouse). **Qonto exclu** (`-from:qonto.com`) : ses notifs « paiement
+   effectué » contiennent nom+montant → faux positifs sinon.
+4. **Vérification** (double garde anti « mauvais marchand ») — le PDF n'est retenu que si (i) le
+   montant de la tx (EUR **ou** devise) est un **vrai total** dans le document (`_pdf_has_total`,
+   OCR + codes ISO EUR/USD/GBP + total éloigné du montant), **ET** (ii) un jeton du nom marchand
+   apparaît dans le PDF / l'expéditeur / le sujet. Reçus **HTML** sans PJ (Square/Sunday/Bolt) :
+   corps rendu en PDF (`saas.render_html_to_pdf`) puis vérifié.
+5. **Décision** — ≥2 emails distincts vérifiés → **skip** (on ne devine jamais). Sinon attache
+   (`upload_attachment`, idempotent). État `reports/qonto/processed.json` (clé = tx id).
+
+Complément (pas remplacement) du flux SaaS : tourne **avant** `run_saas.py` ; le repli reste la
+voie « exact_unique » (unicité montant+date) de `reconcile_saas.py`.
+
+### Lancer
+
+```bash
+python3 scripts/reconcile_qonto.py --since 2026-04-01 --dry-run   # propose tx→PDF, n'attache rien
+python3 scripts/reconcile_qonto.py --since 2026-04-01             # attache
+```
+
+Revoir `reports/qonto/proposals_<date>.md` (dry-run) avant un run réel.
+
+### Automatisation (launchd, ~horaire)
+
+```bash
+cp scripts/com.maisondarwish.qonto-watch.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.qonto-watch.plist
+# suivre : tail -f reports/qonto/watch.log
+```
+
+Cadence horaire (`StartInterval=3600`) : parcourt toutes les tx non rapprochées × IMAP (pas de
+pré-check email bon marché, le déclencheur est côté transactions). Aussi appelé en best-effort
+dans `weekly_recap.sh`.
+
+### Fichiers
+
+| Fichier | Rôle |
+|--------|------|
+| `src/recon/normalize.py` | `label_merchant_tokens` (nom marchand tiré du libellé) |
+| `scripts/reconcile_qonto.py` | Orchestrateur (recherche Gmail nom+montant, vérif, attache) |
+| `scripts/run_qonto_watch.sh` + `com.maisondarwish.qonto-watch.plist` | Poller horaire |
+| `tests/test_qonto_label.py` | Tokens + requête + garde de vérification |
+
+### Notes
+
+- **Sans liste blanche** : le nom vient du libellé Qonto → un fournisseur jamais vu se rapproche
+  quand même. La ligne par fournisseur dans `saas_senders.csv` devient **optionnelle**.
+- **Skip SÛR** (jamais de mauvais attach) : montant qui n'est un total nulle part, aucun lien de
+  nom, ou ≥2 candidats → laissé non rapproché (repris par les autres flux / manuel).
+
+---
+
 ## Récap hebdo FIABLE (lundi 9h)
 
 Mail récap des transactions **sans justificatif** — refondu pour être DIGNE DE CONFIANCE :
@@ -466,6 +534,22 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.weekly
 ---
 
 ## Historique récent
+
+**v1.5 (2026-07-02)** — Flux 6 + robustesse rapprochement
+- **Flux 6 — piloté par la transaction** (`reconcile_qonto.py`) : part d'une tx Qonto sans PJ,
+  cherche le reçu dans Gmail par *nom du libellé + montant*, vérifie (montant-total ET nom), attache.
+  **Sans liste blanche** (`label_merchant_tokens` tire le nom du libellé, strip `SQ*/UBR*/GC RE`…).
+  Reçus HTML rendus si pas de PJ. Poller horaire.
+- **Montant NET débité, pas le brut** : `Facturé <moyen>` (Bolt, promo) dans `saas.py` ;
+  `Reste/Solde/Net à payer|régler|dû` (paiement partagé, resto Le Pschill) dans
+  `reconcile_fournisseurs.py`.
+- **Dates 2 chiffres** `DD.MM.YY` (`02.07.26`, acompte Villa Duflot) ; vendeur Villa Duflot + Uber.
+- **Filet récap (`audit_unreconciled.py`)** : OCR des justificatifs scannés (image, pdftotext vide)
+  + détection du net sans symbole devise + `_pdf_has_total(gap=)` paramétrable + codes ISO EUR/USD/GBP.
+- **`exact_unique`** (`reconcile_saas.py`) : auto-attache sans nom si montant+date **unique** et
+  spécifique (non rond), facture identifiée société. Garde-fous : unicité, fenêtre 5 j, débit non
+  antérieur, l'identité EXIGE `company_id/trusted` (les alias incidents ne comptent pas).
+- Tests : `tests/test_net_amount.py`, `test_unique_gate.py`, `test_qonto_label.py`.
 
 **v1.4 (2026-06-27)** — Récap sur tout l'exercice comptable (≠ 7 j) ; parseur multi-candidats (factures à remise : Total, pas le prix avant remise) ; recherche montant insensible à la position du symbole (`€35.99`). Self-test parsing figé.
 

@@ -4,7 +4,7 @@ Automatisation de rapprochement : trouver le justificatif (reçu/facture) de cha
 Qonto et l'**attacher à la transaction** via l'API Qonto. Codebase **en français** (commentaires,
 docs, libellés). Python 3, **stdlib uniquement** dans le cœur (`urllib`, `json`, `csv`, `re`).
 
-## Les 4 flux
+## Les 6 flux
 
 | Flux | Source | Orchestrateur |
 |------|--------|---------------|
@@ -12,6 +12,8 @@ docs, libellés). Python 3, **stdlib uniquement** dans le cœur (`urllib`, `json
 | 2 — Remboursements UberEats | Gmail + portail (Playwright) | `scripts/run_ubereats.py` |
 | 3 — Factures fournisseurs | Google Drive (OCR Apple Vision) | `scripts/run_fournisseurs.py` |
 | 4 — Factures & reçus email | Gmail (PDF joints + reçus HTML→PDF Chrome) | `scripts/run_saas.py` |
+| 5 — Portails vendeurs | Scraping Playwright (Wix/Notion/OpenAI…) | `scripts/run_portals.py` |
+| 6 — Piloté par la transaction | Tx Qonto sans PJ → Gmail par nom+montant (sans liste blanche) | `scripts/reconcile_qonto.py` |
 
 Détails d'install/lancement : **README.md**. Ce fichier = conventions + pièges.
 
