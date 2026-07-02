@@ -345,6 +345,14 @@ def extract_date(text: str) -> Optional[str]:
     m = re.search(r"\b(\d{1,2})[/.](\d{1,2})[/.](20\d{2})\b", text)
     if m:
         return f"{int(m.group(3)):04d}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+    # DD.MM.YY / DD/MM/YY (année sur 2 chiffres, ex. facture Villa Duflot « 02.07.26 »). Placé
+    # APRÈS les variantes à 4 chiffres. Jour d'abord (FR) ; mois 1-12 exigé → coupe « 1.70 18.70 »
+    # (TVA/prix) ; garde-fous (?<!\d)/(?!\d) → pas de n° de version « 2.52.103 » ni sous-nombre.
+    m = re.search(r"(?<!\d)(\d{1,2})[/.](\d{1,2})[/.](\d{2})(?!\d)", text)
+    if m:
+        d, mo, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            return f"20{yy:02d}-{mo:02d}-{d:02d}"
     return None
 
 

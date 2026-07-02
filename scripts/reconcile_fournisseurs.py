@@ -371,7 +371,14 @@ _MONEY_PAT = re.compile(r"(?<![\d.,])\d{1,3}(?:[ \xa0,.]\d{3})*[.,]\d{2}(?![\d.,
 # Labels d'un VRAI total payé, du plus spécifique au plus générique.
 _TOTAL_LABELS_RANKED = (
     r"amount\s+paid", r"net\s+amount\s+paid", r"montant\s+(?:total\s+)?(?:pay[ée]|pr[ée]lev[ée])",
-    r"net\s+[àa]\s+payer", r"total\s+t\.?\s*t\.?\s*c", r"invoice\s+amount",
+    # NET réellement débité sur CETTE carte quand une partie est déjà réglée (addition partagée /
+    # acompte) ou après ajustement pourboire → « Total » brut ≠ débit. Ex. resto Le Pschill :
+    # Total 30,70 ; déjà payé 7,00 ; pourboire -1,00 → « Reste à payer 24,70 » = le vrai débit.
+    # Famille FR du solde restant, OCR-tolérante (accent « à/a » et espaces optionnels). Rang haut
+    # (prioritaire sur « Total »). Absorbe l'ancien « net à payer ».
+    r"reste\s*[àa]?\s*(?:payer|r[ée]gler)", r"reste\s*d[ûu]\b", r"restant\s*d[ûu]\b",
+    r"solde\s*[àa]?\s*(?:payer|r[ée]gler)", r"net\s*[àa]?\s*(?:payer|r[ée]gler)",
+    r"total\s+t\.?\s*t\.?\s*c", r"invoice\s+amount",
     r"montant\s+total(?:\s+de\s+la\s+facture)?", r"grand\s+total", r"\btotal\b",
 )
 # Lignes « total » à NE PAS prendre (montant brut / HT / déjà payé = 0).
