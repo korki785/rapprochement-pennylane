@@ -29,6 +29,7 @@ rm -f reports/recap/needs_review.json
 # 1. Best-effort : attacher tout justificatif auto-trouvable AVANT de mesurer.
 if [ -z "$DRY" ]; then
     "$PYTHON" scripts/run_fournisseurs.py --since "2026-04-01" --force >> "$LOG" 2>&1 || true
+    "$PYTHON" scripts/reconcile_qonto.py --since "2026-04-01" >> "$LOG" 2>&1 || true
     "$PYTHON" scripts/run_saas.py --since "2026-04-01" >> "$LOG" 2>&1 || true
     "$PYTHON" scripts/run_ubereats.py --since "2026-05-01" >> "$LOG" 2>&1 || true
     "$PYTHON" scripts/run_portals.py --since "2026-04-01" >> "$LOG" 2>&1 || true

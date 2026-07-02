@@ -36,6 +36,15 @@ _LEGAL_SUFFIXES = {
     "LTD", "LIMITED", "INC", "LLC", "CORP", "CO", "GMBH", "AG", "BV", "PLC",
 }
 
+# Préfixes d'intermédiaire de paiement (passerelle/processeur) : NE désignent PAS le marchand.
+# NB : « UBER » n'y est PAS — c'est le marchand dans « UBR* …UBER.COM » ; seul « UBR » est un préfixe.
+_PROCESSOR_PREFIXES = {
+    "SQ", "SQC", "TST", "SP", "SUMUP", "SUM", "UBR", "PP", "PAYPAL", "PYPL",
+    "STRIPE", "GC", "RE", "GOCARDLESS", "ADYEN", "MOLLIE", "IZ", "IZETTLE", "ZTL", "WLT",
+}
+# Jetons génériques à écarter d'un nom de marchand (en plus de `saas._SENDER_STOP`).
+_MERCHANT_STOP = {"PENDING", "HTTP", "HTTPS", "WWW", "HELP", "BILL", "APP"}
+
 # Motifs purgés du libellé avant tokenisation.
 _DATE_RE = re.compile(r"\b\d{1,4}[-/.]\d{1,2}([-/.]\d{1,4})?\b")  # 12/03, 2025-01-04
 _CARD_MASK_RE = re.compile(r"\b[X*]{2,}\d{2,}\b", re.IGNORECASE)   # ****1234, XXXX12
@@ -73,6 +82,24 @@ def normalize_label(label: str) -> str:
     # Retirer le bruit résiduel et les jetons d'un seul caractère.
     tokens = [t for t in tokens if t not in _NOISE_TOKENS and len(t) > 1]
     return " ".join(tokens)
+
+
+def label_merchant_tokens(label: str, min_len: int = 3) -> List[str]:
+    """Extrait les mots MARCHANDS d'un libellé Qonto, sans liste blanche de fournisseurs.
+
+    Réutilise `normalize_label` (accents/dates/masques/n° longs/bruit bancaire/suffixe juridique,
+    et `*`/`.` -> espace), puis retire les préfixes d'intermédiaire de paiement en tête et les
+    jetons génériques/courts. Sert de terme de recherche email pour le rapprochement piloté par
+    la transaction. Ex. « UBR* PENDING.UBER.COM » -> ['UBER'] ; « GC RE AIRCALL » -> ['AIRCALL'] ;
+    « SQ *CERTIFIED CAFE » -> ['CERTIFIED', 'CAFE']. Renvoie [] si aucun mot exploitable.
+    """
+    from .saas import _SENDER_STOP  # import paresseux : évite tout cycle d'import éventuel
+    tokens = normalize_label(label).split()
+    while tokens and tokens[0] in _PROCESSOR_PREFIXES:   # retire GC puis RE, SQ, UBR… en tête
+        tokens.pop(0)
+    stop = _SENDER_STOP | _MERCHANT_STOP
+    kept = [t for t in tokens if len(t) >= min_len and t not in stop]
+    return list(dict.fromkeys(kept))                     # dédup en préservant l'ordre
 
 
 def _token_sort(text: str) -> str:
