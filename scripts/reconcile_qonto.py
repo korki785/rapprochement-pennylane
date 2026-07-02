@@ -70,12 +70,25 @@ def search_receipt_uids(mail, tokens: list, amt_strs: list, d_from: str, d_to: s
     return data[0].split() if (typ == "OK" and data and data[0]) else []
 
 
+VERIFY_GAP = 200   # tolère un total éloigné du montant (colonnes) — le nom marchand reste exigé
+
+
 def verify_pdf(pdf_txt: str, amt_strs: list, tokens: list, sender: str, subject: str) -> bool:
     """Accepte le PDF SEULEMENT si le montant est un vrai total ET un jeton marchand est présent."""
-    if not pdf_txt or not audit._pdf_has_total(pdf_txt, amt_strs):
+    if not pdf_txt or not audit._pdf_has_total(pdf_txt, amt_strs, gap=VERIFY_GAP):
         return False
     hay = saas.strip_accents(f"{pdf_txt}\n{sender}\n{subject}").upper()
     return any(tok in hay for tok in tokens)
+
+
+def _html_body(msg) -> str:
+    """Corps HTML d'un email (reçus Square/Sunday/Bolt… sans PJ PDF)."""
+    for part in msg.walk():
+        if part.get_content_type() == "text/html":
+            payload = part.get_payload(decode=True)
+            if payload:
+                return payload.decode(part.get_content_charset() or "utf-8", "replace")
+    return ""
 
 
 def _connect_boxes() -> list:
@@ -118,9 +131,23 @@ def find_receipt(tx: dict, boxes: list, tokens: list) -> tuple:
             msgid = fetch._decode(msg.get("Message-ID") or uid.decode("ascii", "replace"))
             sender = fetch._decode(msg.get("From") or "")
             subject = fetch._decode(msg.get("Subject") or "")
+            got = False
             for pdf in fetch.extract_pdfs(msg, INPUT_DIR, msgid):
                 if verify_pdf(audit._pdftotext(pdf), amt_strs, tokens, sender, subject):
                     verified.append((pdf, tag, msgid))
+                    got = True
+            if not got:
+                # Reçu HTML sans PJ PDF (Square/Sunday/Bolt…) : rend le corps en PDF puis vérifie.
+                html = _html_body(msg)
+                if html:
+                    tagname = "".join(ch for ch in msgid if ch.isalnum())[:10] or "x"
+                    dest = INPUT_DIR / f"recu_{tagname}.pdf"
+                    try:
+                        if saas.render_html_to_pdf(html, dest) and verify_pdf(
+                                audit._pdftotext(dest), amt_strs, tokens, sender, subject):
+                            verified.append((dest, tag, msgid))
+                    except Exception:
+                        pass
     if not verified:
         return (None, "", "none")
     if len({v[2] for v in verified}) > 1:               # ≥2 emails distincts → on ne devine pas
@@ -138,7 +165,7 @@ def main() -> int:
     args = parser.parse_args()
 
     load_dotenv()
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
     client = QontoClient(*load_qonto_credentials())
     processed = _load_json(PROCESSED_PATH)
 

@@ -139,12 +139,20 @@ _NET_KW = (r"(?:factur[ée]|reste\s*[àa]?\s*(?:payer|r[ée]gler)|solde\s*[àa]?
            r"net\s*[àa]?\s*(?:payer|r[ée]gler)|total\s+t\.?\s*t\.?\s*c|montant\s+(?:pay[ée]\w*|total))")
 
 
-def _pdf_has_total(txt: str, amt_strs: list) -> bool:
+# Marqueur de devise : symbole OU code ISO en toutes lettres (« 15,04 EUR », « USD 6.00 »).
+_CUR = r"(?:[€$£]|\bEUR\b|\bUSD\b|\bGBP\b)"
+
+
+def _pdf_has_total(txt: str, amt_strs: list, gap: int = 75) -> bool:
+    """`gap` = largeur max (caractères, même ligne) entre le mot-clé « total/payé… » et le
+    montant. 75 par défaut (audit strict) ; le rapprochement piloté-transaction passe plus large
+    (montant souvent en colonne, loin du label — ex. reçu Uber « Total …90 espaces… 15,04 € »),
+    car il exige EN PLUS le nom marchand (double garde -> pas de faux positif)."""
     for s in amt_strs:
         esc = re.escape(s)
-        # Symbole devise AVANT (« €35.99 ») OU APRÈS (« 35.99 € ») le montant.
-        money = r"(?:[€$£]\s*" + esc + r"|" + esc + r"\s*[€$£])"
-        if re.search(_TOTAL_KW + r"[^\n]{0,75}" + money, txt, re.IGNORECASE):
+        # Devise (symbole ou code ISO) AVANT (« €35.99 ») OU APRÈS (« 35.99 € / 35.99 EUR »).
+        money = r"(?:" + _CUR + r"\s*" + esc + r"|" + esc + r"\s*" + _CUR + r")"
+        if re.search(_TOTAL_KW + r"[^\n]{0," + str(gap) + r"}" + money, txt, re.IGNORECASE):
             return True
         if re.search(money + r"[^\n]{0,40}" + _TOTAL_KW, txt, re.IGNORECASE):
             return True

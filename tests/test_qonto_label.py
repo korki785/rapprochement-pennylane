@@ -57,3 +57,17 @@ def test_verify_rejects_when_amount_not_a_total():
 def test_verify_name_can_come_from_sender_or_subject():
     txt = "Recu de votre course\nTotal 15,04 €\n"             # pas de "UBER" dans le corps…
     assert rq.verify_pdf(txt, _amt_strs(15.04), ["UBER"], "receipts@uber.com", "Uber") is True
+
+
+def test_verify_wide_gap_between_total_and_amount():
+    # Reçu type Uber : « Total » très loin du montant sur la même ligne (colonne). gap=200 le capte.
+    txt = "Total" + " " * 90 + "15,04 €\nMerci d'avoir utilise Uber\n"
+    assert audit._pdf_has_total(txt, _amt_strs(15.04), gap=200) is True
+    assert audit._pdf_has_total(txt, _amt_strs(15.04), gap=75) is False   # défaut strict inchangé
+    assert rq.verify_pdf(txt, _amt_strs(15.04), ["UBER"], "x@uber.com", "Uber") is True
+
+
+def test_verify_accepts_iso_currency_code():
+    # « 6.00 USD » (code ISO, pas de symbole) doit compter comme total.
+    txt = "Amount paid 6.00 USD\nAnthropic\n"
+    assert audit._pdf_has_total(txt, _amt_strs(6.00)) is True
