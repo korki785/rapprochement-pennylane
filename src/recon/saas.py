@@ -259,6 +259,11 @@ _MONEY = (r"(?<![\d.,])("
           r")(?![\d])")
 # Du plus spécifique (montant réellement dû) au plus générique. « T.T.C » toléré pointé.
 _TOTAL_LABELS = (
+    # Montant NET réellement débité, prioritaire sur le Total TTC brut. Ex. Bolt applique un
+    # bon/crédit : « Total TTC 20.00 / Payé par <code> -4.00 / Facturé Apple Pay 16.00 » → 16 est
+    # le vrai débit carte. On exige un mot (moyen de paiement) après pour ne PAS capter le nom
+    # « Facture émise par… » ni « N° de facture 2007359 » (suivi d'un chiffre, pas d'une lettre).
+    r"factur[ée]\s+[a-zà-ÿ]",
     r"amount\s+paid", r"montant\s+(?:total\s+)?(?:pay[ée]|pr[ée]lev[ée])",
     r"net\s+[àa]\s+payer", r"total\s+t\.?\s*t\.?\s*c", r"total\s+t\.?v\.?a\.?\s+incl",
     r"montant\s+total(?:\s+de\s+la\s+facture)?", r"total\s+amount",
