@@ -14,3 +14,4 @@ QRCodeGen,QR-CODE-GENERATOR,qr_gen,QRCODEGEN,https://www.qr-code-generator.com/a
 Bouygues,BOUYGUES TELECOM,bouygues,BOUYGUES,https://www.bouyguestelecom.fr/mon-compte/,~20€/mois
 Airbnb,AIRBNB,airbnb,AIRBNB,https://www.airbnb.fr/trips/,ponctuel
 Turo,TURO INC,turo,TURO,https://turo.com/us/en/trips/,location voiture
+Kandbaz,KANDBAZ,kandbaz,KANDBAZ,https://my.kandbaz.com/mes-factures,"Domiciliation. 2FA email (code alphanum 6 car. lu dans Gmail hello@). Factures = mêmes que par email (fallback). DL bloqué par pop-up conformité LCB-FT tant que dossier pas à jour."
