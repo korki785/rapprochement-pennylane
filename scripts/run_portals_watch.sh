@@ -5,6 +5,7 @@ set -euo pipefail
 
 cd /Users/naeldarwish/rapprochement-pennylane
 PYTHON=/Users/naeldarwish/Library/Python/3.9/bin/python3
+[ -x "$PYTHON" ] || PYTHON=/usr/bin/python3   # repli : le chemin 3.9 peut ne plus exister
 
 if ! $PYTHON scripts/portals_has_new.py --since 2026-04-01; then
     exit 0
