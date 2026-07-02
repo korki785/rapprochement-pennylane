@@ -61,11 +61,27 @@ _SEARCH_EXCLUDE = ["qonto.com", "naelkodmani@gmail.com"]
 _PDFTEXT_CACHE: dict = {}   # path -> texte (audit sur l'exercice = bcp de candidats × PDF)
 
 
+def _ocr_fallback(path: Path) -> str:
+    """OCR d'un PDF scanné (image) via le pipeline partagé fournisseurs (Vision + cache).
+
+    CRITIQUE : sans ça, un justificatif scanné (photo de reçu — ex. N0569 « Reste à payer
+    24,70 » du resto Le Pschill) renvoie un texte pdftotext VIDE → l'audit le rate → déclare
+    À TORT la transaction « non rapprochée ». Le filet anti-faux-positif du récap DOIT OCR-iser.
+    """
+    try:
+        from reconcile_fournisseurs import _extract_text  # scripts/ déjà sur sys.path
+        return _extract_text(path) or ""
+    except Exception:
+        return ""
+
+
 def _pdftotext(path: Path) -> str:
     key = str(path)
     if key in _PDFTEXT_CACHE:
         return _PDFTEXT_CACHE[key]
     txt = _pdftotext_raw(path)
+    if len(txt.strip()) < 20:            # PDF scanné (image) → pdftotext vide → repli OCR
+        txt = _ocr_fallback(path) or txt
     _PDFTEXT_CACHE[key] = txt
     return txt
 
@@ -110,8 +126,17 @@ def _amount_strings(targets: list) -> list:
 
 # Montant considéré comme un VRAI total payé s'il est proche d'un de ces mots-clés
 # (évite les faux positifs : « TVA (20,00 %) », sous-totaux, numéros, stats).
-_TOTAL_KW = (r"(?:total|montant|pay[ée]\w*|factur[ée]|net\s+[àa]\s+payer|"
+# « pay[ée]\w* » couvre déjà « payer » (reste/solde/net à payer) ; on ajoute la famille du
+# solde restant (reste/solde/restant dû) pour le net réellement débité (paiement partagé/acompte).
+_TOTAL_KW = (r"(?:total|montant|pay[ée]\w*|factur[ée]|net\s+[àa]\s+payer|reste|solde|restant|"
              r"amount\s+(?:paid|due)|grand\s+total|charg)")
+
+# Sous-ensemble de labels de paiement FORTS (haute précision) : on accepte le montant adossé
+# à eux MÊME SANS symbole devise. Certaines factures listent les montants sans € par ligne
+# (colonne « (EUR) »), ex. Bolt « Facturé Apple Pay 16.00 ». Ces labels sont assez spécifiques
+# pour ne pas capter un nombre parasite (≠ le « total » générique, gardé, lui, avec symbole).
+_NET_KW = (r"(?:factur[ée]|reste\s*[àa]?\s*(?:payer|r[ée]gler)|solde\s*[àa]?\s*(?:payer|r[ée]gler)|"
+           r"net\s*[àa]?\s*(?:payer|r[ée]gler)|total\s+t\.?\s*t\.?\s*c|montant\s+(?:pay[ée]\w*|total))")
 
 
 def _pdf_has_total(txt: str, amt_strs: list) -> bool:
@@ -122,6 +147,11 @@ def _pdf_has_total(txt: str, amt_strs: list) -> bool:
         if re.search(_TOTAL_KW + r"[^\n]{0,75}" + money, txt, re.IGNORECASE):
             return True
         if re.search(money + r"[^\n]{0,40}" + _TOTAL_KW, txt, re.IGNORECASE):
+            return True
+        # Sans symbole devise : uniquement adossé à un label de paiement FORT (Facturé / Reste
+        # à payer / Total TTC…). Lookbehind/lookahead = pas de sous-nombre (« 116.00 » ≠ 16.00).
+        amt_only = r"(?<![\d.,])" + esc + r"(?![\d.,])"
+        if re.search(_NET_KW + r"[^\n]{0,40}" + amt_only, txt, re.IGNORECASE):
             return True
     return False
 
