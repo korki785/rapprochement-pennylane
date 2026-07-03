@@ -530,7 +530,10 @@ def load_qonto_debits(json_path: Path) -> List[QontoDebit]:
 # --------------------------------------------------------------------------- #
 def _days_between(d1: str, d2: str) -> int:
     from datetime import date
-    return abs((date.fromisoformat(d1) - date.fromisoformat(d2)).days)
+    try:
+        return abs((date.fromisoformat(str(d1)[:10]) - date.fromisoformat(str(d2)[:10])).days)
+    except (ValueError, TypeError):
+        return 10 ** 6   # date illisible/None -> hors de toute fenêtre (jamais matché, pas de crash)
 
 
 def _amount_close(a: float, b: float) -> bool:
@@ -592,7 +595,7 @@ def match(invoices: List[SupplierInvoice], debits: List[QontoDebit],
     report = ReconciliationReport()
     report.unmatched_invoices.extend(i for i in invoices if not i.is_valid)
 
-    valid = sorted((i for i in invoices if i.is_valid), key=lambda i: i.date)
+    valid = sorted((i for i in invoices if i.is_valid), key=lambda i: i.date or "")
     used: set[str] = set()
     unmatched: List[SupplierInvoice] = []
 
