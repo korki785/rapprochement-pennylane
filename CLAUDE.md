@@ -4,7 +4,9 @@ Automatisation de rapprochement : trouver le justificatif (reçu/facture) de cha
 Qonto et l'**attacher à la transaction** via l'API Qonto. Codebase **en français** (commentaires,
 docs, libellés). Python 3, **stdlib uniquement** dans le cœur (`urllib`, `json`, `csv`, `re`).
 
-## Les 6 flux
+## Les 7 flux
+
+Flux 1-6 = **dépenses** (justificatif → débit). Flux 7 = **recettes** (facture client → crédit, sens inverse).
 
 | Flux | Source | Orchestrateur |
 |------|--------|---------------|
@@ -14,6 +16,7 @@ docs, libellés). Python 3, **stdlib uniquement** dans le cœur (`urllib`, `json
 | 4 — Factures & reçus email | Gmail (PDF joints + reçus HTML→PDF Chrome) | `scripts/run_saas.py` |
 | 5 — Portails vendeurs | Scraping Playwright (Wix/Notion/OpenAI…) | `scripts/run_portals.py` |
 | 6 — Piloté par la transaction | Tx Qonto sans PJ → Gmail par nom+montant (sans liste blanche) | `scripts/reconcile_qonto.py` |
+| 7 — Recettes | Virement créditeur → facture client Qonto (`attachment_id`) attachée | `scripts/run_recettes.py` |
 
 Détails d'install/lancement : **README.md**. Ce fichier = conventions + pièges.
 

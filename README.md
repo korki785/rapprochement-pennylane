@@ -1,6 +1,6 @@
 # Rapprochement justificatifs → Qonto
 
-Six flux automatisés de rapprochement justificatif → transaction Qonto :
+Sept flux automatisés de rapprochement justificatif → transaction Qonto. Les flux 1 à 6 couvrent les **dépenses** (attacher un reçu/facture à un **débit**) ; le flux 7 couvre les **recettes** (attacher la facture client émise à un **virement créditeur**) :
 
 1. **Dépenses USD** par carte (reçus Gmail pro → justificatif PDF).
 2. **UberEats** (reçus Gmail perso → virements de remboursement Qonto) — *continu, ≈ à chaque mail*.
@@ -8,8 +8,9 @@ Six flux automatisés de rapprochement justificatif → transaction Qonto :
 4. **Factures & reçus par email** (SaaS : Anthropic, Aircall, Square, etc.) — *continu, ≈ à chaque mail*.
 5. **Portails vendeurs** (Wix, Notion, OpenAI, Hunter, etc.) — *continu, ≈ toutes les 15 min*.
 6. **Piloté par la transaction** (part d'une tx Qonto sans PJ → cherche le reçu dans Gmail par *nom du libellé + montant* → attache, **sans liste blanche de fournisseurs**) — *≈ horaire*.
+7. **Recettes** (facture client payée → attache le PDF de la facture au virement créditeur) — *continu, ≈ toutes les 15 min*.
 
-Les flux 2 et 3 tournent en continu via des pollers launchd (toutes les 15 min) ; le flux 3 envoie un rapport email chaque lundi des justificatifs non rapprochés.
+Les flux 2, 3, 4, 5 et 7 tournent en continu via des pollers launchd (toutes les 15 min) ; le flux 3 envoie un rapport email chaque lundi des justificatifs non rapprochés.
 
 ---
 
@@ -529,6 +530,74 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.weekly
 
 ---
 
+## Flux 7 — Recettes (factures clients ↔ virements créditeurs)
+
+Sens **inverse** de tous les autres flux : côté **crédit**. Quand un client paie une facture émise
+par virement entrant, on attache le **PDF de la facture** à la transaction créditrice Qonto
+(justificatif de la recette). N'auto-attache que ; **ne change pas** le statut « payé » de la facture.
+
+### Fait métier — virements SWIFT
+
+Les clients étrangers (ex. Allegria, US) paient par **virement SWIFT** → le montant crédité ≠ total
+de la facture (frais bancaires ~40 € déduits, ou petit écart d'arrondi FX). Le rapprochement ne peut
+donc pas être exact au centime sur tous les virements. Souvent `local_amount` == total exact (les frais
+sont déduits de `amount`) → match exact via `local_amount` ; sinon petit arrondi FX (ex. 1818,00 reçu
+vs 1817,94 facturé) → tier `swift`.
+
+### Workflow (orchestré par `scripts/run_recettes.py`)
+
+1. **Virements** — `QontoClient.fetch_all_credits` → `qonto_credits.json` (côté `side=credit`).
+2. **Factures** — `QontoClient.list_client_invoices` → `client_invoices.json` (chaque facture porte
+   son PDF dans `attachment_id`).
+3. **Rapprocher** — `reconcile_recettes.py` :
+   - **Nom client EXIGÉ** : un jeton du nom de la facture (normalisé, suffixe `INC/LLC/…` retiré) doit
+     être dans le libellé Qonto (garde anti-faux-positif « bon montant, mauvais client »).
+   - **Montant** : reçu (`amount` **ou** `local_amount`) ∈ `[total − 45 €, total + 2 €]` (frais SWIFT / arrondi).
+   - **Confiance** : `exact` (|reçu − total| ≤ 0,02) · `swift` (bande + `swift_income` + couple **unique**)
+     · `warn` (bande non-exact ou ambigu → listé, jamais auto-attaché). Auto-attache = `exact` + `swift`.
+   - Un paiement ne peut pas précéder l'émission de la facture (marge 5 j).
+4. **Attacher** — `get_attachment_url` (URL présignée S3 ~30 min) → `download_url` → `upload_attachment`
+   sur la transaction créditrice (skip si elle a déjà une PJ → **idempotent**, auto-réparation).
+5. **Marquer** — `reports/recettes/processed.json` (clé = **tx_id**).
+
+### Lancer
+
+```bash
+python3 scripts/run_recettes.py --since 2026-04-01 --dry-run   # test : rapproche, n'attache rien
+python3 scripts/run_recettes.py --since 2026-04-01             # flux complet
+```
+
+### Automatisation continue (launchd)
+
+Poller toutes les 15 min (`com.maisondarwish.recettes-watch.plist`, `StartInterval=900`) : le
+déclencheur est côté Qonto (virement entrant), donc pas de pré-check — chaque passage relit les
+virements et attache dès qu'une facture correspond.
+
+```bash
+cp scripts/com.maisondarwish.recettes-watch.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.recettes-watch.plist
+# suivre : tail -f reports/recettes/watch.log
+```
+
+### Fichiers
+
+| Fichier | Rôle |
+|--------|------|
+| `src/recon/qonto_client.py` | `fetch_all_credits`, `list_client_invoices`, `get_attachment_url`, `download_url` |
+| `scripts/reconcile_recettes.py` | Rapproche factures clients ↔ virements (nom + montant, tolérance SWIFT) |
+| `scripts/run_recettes.py` | Orchestrateur (`--since`, `--dry-run`) |
+| `scripts/run_recettes_watch.sh` + `com.maisondarwish.recettes-watch.plist` | Poller 15 min |
+| `tests/test_recettes_match.py` | Règles de match (exact, SWIFT unique, faux positif, ambiguïté) |
+
+### Notes
+
+- **Ne touche pas le statut de la facture** (`mark_client_invoice_as_paid` non utilisé) — attache seulement le PDF.
+- `upload_attachment` fonctionne côté **crédit** (Qonto génère même la version probante).
+- Les factures « sans virement » du rapport = impayées ou payées par un autre moyen — normal.
+- Démarre au **01/04/2026**.
+
+---
+
 ## Notes générales
 
 - Pas de fabrication : un justificatif n'est attaché que si un **vrai reçu** existe.
@@ -537,6 +606,15 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.weekly
 ---
 
 ## Historique récent
+
+**v1.7 (2026-07-04)** — Flux 7 : recettes (côté crédit)
+- **`reconcile_recettes.py` + `run_recettes.py`** : factures clients ↔ virements créditeurs → attache le
+  PDF de la facture à la transaction créditrice. Nom client exigé + tolérance frais SWIFT (`amount` ou
+  `local_amount` ∈ [total−45, total+2]). Confiance `exact`/`swift`(unique)/`warn`. Poller 15 min.
+- **`qonto_client.py`** +4 méthodes : `fetch_all_credits` (side=credit), `list_client_invoices`
+  (`/client_invoices`), `get_attachment_url` (`/attachments/{id}` → URL présignée), `download_url`.
+- **LIVE** : 4 rapprochées (Allegria ×3, See You Soon ×1), F-2026-010 (swift) + F-2026-003 (exact)
+  attachées, idempotent confirmé. `tests/test_recettes_match.py` (9 cas).
 
 **v1.6 (2026-07-02)** — Portails : Hunter + Kandbaz, poller réparé
 - **Hunter** ✅ : URLs déplacées (`/sign-in`, `/account/billing` = 404) → `/users/sign_in` +
