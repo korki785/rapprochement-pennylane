@@ -196,6 +196,43 @@ class QontoClient:
                 })
         return out
 
+    def fetch_all_credits(
+        self, since: str, operation_types: Optional[List[str]] = None,
+    ) -> List[Dict]:
+        """Tous les crédits (recettes) depuis `since`, toutes opérations confondues.
+
+        Symétrique de fetch_all_debits mais côté `side == "credit"` : virements
+        entrants (income), virements SWIFT (swift_income), etc. Conserve
+        local_amount / local_currency (virement en devise) et le statut PJ LIVE
+        (attachment_ids / attachment_required) pour l'idempotence côté recettes.
+
+        `operation_types` : filtre optionnel, ex. ["income", "swift_income"]. None = tout.
+        """
+        out: List[Dict] = []
+        for acct in self.list_bank_account_ids():
+            for tx in self.iter_transactions(acct):
+                if tx.get("side") != "credit":
+                    continue
+                settled = str(tx.get("settled_at") or tx.get("emitted_at") or "")[:10]
+                if settled and settled < since:
+                    continue
+                op_type = str(tx.get("operation_type") or "")
+                if operation_types and op_type not in operation_types:
+                    continue
+                out.append({
+                    "id": str(tx.get("id") or tx.get("transaction_id") or ""),
+                    "label": str(tx.get("label") or ""),
+                    "amount": tx.get("amount"),
+                    "currency": tx.get("currency") or "EUR",
+                    "local_amount": tx.get("local_amount"),
+                    "local_currency": tx.get("local_currency") or "",
+                    "settled_at": settled,
+                    "operation_type": op_type,
+                    "attachment_required": bool(tx.get("attachment_required")),
+                    "attachment_ids": tx.get("attachment_ids") or [],
+                })
+        return out
+
     def fetch_unreconciled_expenses(self, since: str) -> List[Dict]:
         """Débits « à justifier » depuis `since`, AVEC statut PJ LIVE.
 
@@ -234,6 +271,58 @@ class QontoClient:
                     "attachment_ids": tx.get("attachment_ids") or [],
                 })
         return out
+
+    # -- Factures clients (recettes) ---------------------------------------
+    def list_client_invoices(self, status: Optional[List[str]] = None,
+                             page_size: int = 100) -> List[Dict]:
+        """Toutes les factures clients émises (pagination Qonto `meta`).
+
+        Renvoie les champs utiles au rapprochement recettes : id, number, statut,
+        total (`total_amount.value`), devise, `attachment_id` (= PDF de la facture)
+        et `client.name`. `status` : filtre optionnel (ex. ["unpaid", "paid"]).
+        """
+        out: List[Dict] = []
+        page = 1
+        while True:
+            params = {"per_page": str(page_size), "page": str(page)}
+            if status:
+                params["filter[status]"] = ",".join(status)
+            q = urllib.parse.urlencode(params)
+            data = self.get("/client_invoices?" + q)
+            for inv in data.get("client_invoices", []):
+                total = inv.get("total_amount") or {}
+                client = inv.get("client") or {}
+                out.append({
+                    "id": str(inv.get("id") or ""),
+                    "number": str(inv.get("number") or ""),
+                    "status": str(inv.get("status") or ""),
+                    "client_name": str(client.get("name") or ""),
+                    "total_amount": total.get("value"),
+                    "currency": str(inv.get("currency") or total.get("currency") or "EUR"),
+                    "attachment_id": str(inv.get("attachment_id") or ""),
+                    "issue_date": str(inv.get("issue_date") or "")[:10],
+                    "paid_at": str(inv.get("paid_at") or "")[:10],
+                })
+            meta = data.get("meta", {})
+            if not meta.get("next_page"):
+                return out
+            page = meta["next_page"]
+
+    def get_attachment_url(self, attachment_id: str) -> str:
+        """URL présignée (S3, ~30 min) du fichier d'une pièce jointe / facture."""
+        data = self.get(f"/attachments/{attachment_id}")
+        return str((data.get("attachment") or {}).get("url") or "")
+
+    def download_url(self, url: str, dest: Path) -> Path:
+        """Télécharge une URL (ex. présignée S3, sans auth) vers `dest` via curl."""
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["curl", "-s", "-L", "--max-time", str(self._timeout), "-o", str(dest), url],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
+            raise QontoError(f"Téléchargement échoué ({url[:80]}…) : {result.stderr[:200]}")
+        return dest
 
     # -- Pièces jointes -----------------------------------------------------
     def get_transaction_attachments(self, transaction_id: str) -> List[Dict]:
