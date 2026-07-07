@@ -107,22 +107,23 @@ def _connect_boxes() -> list:
     return boxes
 
 
-def find_receipt(tx: dict, boxes: list, tokens: list) -> tuple:
-    """Cherche un justificatif vérifié pour la transaction. Renvoie (pdf_path, tag, status).
+def collect_verified_receipts(tx: dict, boxes: list, tokens: list) -> list:
+    """Liste TOUS les justificatifs vérifiés : [{pdf, tag, msgid, sender, subject}].
 
-    status ∈ {"found", "none", "ambiguous"}. "ambiguous" = ≥2 emails distincts passent la vérif.
+    Ne tranche pas l'ambiguïté (≥2 emails) : renvoie tout, à charge de l'appelant de
+    choisir (auto si un seul email, ou sélection manuelle côté dashboard).
     """
     amt_strs = audit._amount_strings(audit._amount_targets(tx))
     if not amt_strs:
-        return (None, "", "none")
+        return []
     try:
         ref = datetime.strptime(tx["settled_at"][:10], "%Y-%m-%d").date()
     except (ValueError, KeyError, TypeError):
-        return (None, "", "none")
+        return []
     d_from = (ref - timedelta(days=audit.DATE_WINDOW)).strftime("%Y/%m/%d")
     d_to = (ref + timedelta(days=audit.DATE_WINDOW)).strftime("%Y/%m/%d")
 
-    verified = []          # (pdf_path, tag, email_key)
+    verified = []
     for mail, tag in boxes:
         for uid in search_receipt_uids(mail, tokens, amt_strs, d_from, d_to):
             msg = fetch.fetch_message(mail, uid)
@@ -134,7 +135,8 @@ def find_receipt(tx: dict, boxes: list, tokens: list) -> tuple:
             got = False
             for pdf in fetch.extract_pdfs(msg, INPUT_DIR, msgid):
                 if verify_pdf(audit._pdftotext(pdf), amt_strs, tokens, sender, subject):
-                    verified.append((pdf, tag, msgid))
+                    verified.append({"pdf": pdf, "tag": tag, "msgid": msgid,
+                                     "sender": sender, "subject": subject})
                     got = True
             if not got:
                 # Reçu HTML sans PJ PDF (Square/Sunday/Bolt…) : rend le corps en PDF puis vérifie.
@@ -145,16 +147,26 @@ def find_receipt(tx: dict, boxes: list, tokens: list) -> tuple:
                     try:
                         if saas.render_html_to_pdf(html, dest) and verify_pdf(
                                 audit._pdftotext(dest), amt_strs, tokens, sender, subject):
-                            verified.append((dest, tag, msgid))
+                            verified.append({"pdf": dest, "tag": tag, "msgid": msgid,
+                                             "sender": sender, "subject": subject})
                     except Exception:
                         pass
+    return verified
+
+
+def find_receipt(tx: dict, boxes: list, tokens: list) -> tuple:
+    """Cherche un justificatif vérifié pour la transaction. Renvoie (pdf_path, tag, status).
+
+    status ∈ {"found", "none", "ambiguous"}. "ambiguous" = ≥2 emails distincts passent la vérif.
+    """
+    verified = collect_verified_receipts(tx, boxes, tokens)
     if not verified:
         return (None, "", "none")
-    if len({v[2] for v in verified}) > 1:               # ≥2 emails distincts → on ne devine pas
+    if len({v["msgid"] for v in verified}) > 1:         # ≥2 emails distincts → on ne devine pas
         return (None, "", "ambiguous")
     # Un seul email : préfère un PDF qui « ressemble à une facture », sinon le premier.
-    best = next((v for v in verified if saas.looks_like_invoice(audit._pdftotext(v[0]))), verified[0])
-    return (best[0], best[1], "found")
+    best = next((v for v in verified if saas.looks_like_invoice(audit._pdftotext(v["pdf"]))), verified[0])
+    return (best["pdf"], best["tag"], "found")
 
 
 def main() -> int:

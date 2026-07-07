@@ -46,11 +46,16 @@ def _load_json(path: Path, default):
 def _run_fetcher(vendor_key: str, since: str, out_dir: Path,
                  headed: bool, dry_run: bool) -> int:
     fetcher = SCRIPTS / "portals" / f"fetch_{vendor_key}.py"
+    extra = []
     if not fetcher.exists():
-        print(f"  ✗ fetch_{vendor_key}.py introuvable ({fetcher})", file=sys.stderr)
-        return 1
+        # Repli générique (abonnements ajoutés via le dashboard, sans fetcher dédié).
+        fetcher = SCRIPTS / "portals" / "fetch_generic.py"
+        extra = ["--vendor", vendor_key]
+        if not fetcher.exists():
+            print(f"  ✗ fetch_{vendor_key}.py introuvable ({fetcher})", file=sys.stderr)
+            return 1
     cmd = [
-        sys.executable, str(fetcher),
+        sys.executable, str(fetcher), *extra,
         "--since", since,
         "--out-dir", str(out_dir / vendor_key / "input"),
     ]

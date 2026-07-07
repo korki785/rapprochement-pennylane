@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.maisondarwish.dashboard</string>
+
+    <!-- Serveur cockpit local (http.server stdlib). Tourne en continu sur 127.0.0.1:8787. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/naeldarwish/rapprochement-pennylane/scripts/dashboard.py</string>
+        <string>--port</string>
+        <string>8787</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/naeldarwish/rapprochement-pennylane</string>
+
+    <!-- Processus long : lancé au boot, relancé s'il meurt (pas de StartInterval). -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/naeldarwish/rapprochement-pennylane/reports/dashboard_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/naeldarwish/rapprochement-pennylane/reports/dashboard_stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/naeldarwish</string>
+    </dict>
+</dict>
+</plist>
