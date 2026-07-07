@@ -12,6 +12,8 @@ Sept flux automatisés de rapprochement justificatif → transaction Qonto. Les 
 
 Les flux 2, 3, 4, 5 et 7 tournent en continu via des pollers launchd (toutes les 15 min) ; le flux 3 envoie un rapport email chaque lundi des justificatifs non rapprochés.
 
+Un **cockpit web local** (`scripts/dashboard.py`, http://127.0.0.1:8787) donne la vue d'ensemble : santé des sessions portails, compteurs par flux, transactions Qonto sans justificatif en direct, avec **Retenter** (recherche multi-source à la demande), **Ignorer** et **Ajouter un abonnement**. Voir la section [Cockpit](#cockpit--tableau-de-bord-local).
+
 ---
 
 ## Flux 1 — Dépenses USD (carte pro)
@@ -598,6 +600,59 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.recett
 
 ---
 
+## Cockpit — tableau de bord local
+
+Vue unique de l'état des 7 flux + actions à la demande. Serveur Python **stdlib** (aucun pip), page web perso.
+
+### Lancer
+
+```bash
+/usr/bin/python3 scripts/dashboard.py          # → http://127.0.0.1:8787
+```
+
+Service permanent (launchd) :
+
+```bash
+cp scripts/com.maisondarwish.dashboard.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.maisondarwish.dashboard.plist
+# recharger après une maj du code :
+launchctl kickstart -k gui/$(id -u)/com.maisondarwish.dashboard
+```
+
+Accès à distance : tunnel vers le Mac (Tailscale ou Cloudflare) — voir `scripts/tunnel/README.md`. Bind **127.0.0.1 uniquement**, jamais `0.0.0.0` (secrets restent sur le Mac).
+
+### Panneaux
+
+1. **Santé sessions portails** — 🟢🟡🔴 depuis l'horizon des cookies *valides* + mtime (openai/hunter = port CDP 9222). Bouton **Tester** = sonde live headless (vérité serveur, attrape les faux-verts type Bouygues).
+2. **Vue rapprochement par flux** — compteurs rapprochées / à vérifier / en attente lus dans les `reconciliation_*.md`.
+3. **Qonto sans justificatif** — **live** (`fetch_unreconciled_expenses`), pas de cache figé → parité avec l'app Qonto.
+
+### Actions
+
+- **Reconnecter** (session 🔴) → `fetch_<key>.py --init-session` headed (login manuel + 2FA).
+- **Retenter** (par tx) → recherche en **cascade** : Gmail/HTML (flux 6) → Drive OCR (flux 3) → portail (flux 5). Propose le PDF, **Confirmer** attache (garde-fou idempotence live). Ambigu → liste de candidats à choisir (aperçu **Voir**).
+- **Ignorer** (tx non rapprochable) → masque en local (`reports/cockpit/ignored.json`) **+ ouvre la tx dans Qonto web** (deep-link `?highlight=<id>`) pour marquer « justificatif non requis » en 1 clic (l'API third-party ne l'expose pas : `PATCH /transactions` → 404).
+- **Ajouter un abonnement** → email (ligne dans `saas_senders.csv`) ou portail (ligne `portal_vendors.csv` + creds `.env` + capture login via `fetch_generic.py`).
+
+### Endpoints (127.0.0.1:8787)
+
+`GET /api/status`, `GET /api/unreconciled` (live), `GET /api/pdf` (aperçu, bridé à `reports/`), `POST /api/{session/test, session/relogin, retry, attach, ignore, unignore, subscription/add}`.
+
+### Fichiers
+
+- `scripts/dashboard.py` (serveur) + `scripts/dashboard.html` (UI) + `src/recon/health.py` (statut sessions + compteurs — pur stdlib, testable).
+- `scripts/portals/fetch_generic.py` — scraper portail générique (repli dans `run_portals.py` si pas de `fetch_<key>.py`).
+- `scripts/qonto_web.py` — exploration UI Qonto (non utilisé : le deep-link + clic manuel a remplacé le clic auto headless, trop fragile).
+- `reports/cockpit/ignored.json` — tx masquées (gitignored).
+
+### Notes
+
+- **Bouygues** = SPA OAuth **non scrapable** (factures via API interne, jamais en lien de page) → dépôt manuel ou ignorer.
+- Retenter Drive matche par **montant** dans l'OCR (factures type Air France : codes de réservation, pas de nom marchand lisible) ; l'humain confirme.
+- `.qonto_web_session.json` et `reports/` restent **gitignored**.
+
+---
+
 ## Notes générales
 
 - Pas de fabrication : un justificatif n'est attaché que si un **vrai reçu** existe.
@@ -606,6 +661,17 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.recett
 ---
 
 ## Historique récent
+
+**v1.8 (2026-07-07)** — Cockpit (tableau de bord local)
+- **`dashboard.py`** (serveur stdlib, bind 127.0.0.1) + **`dashboard.html`** + **`health.py`** : 3 panneaux
+  (santé sessions, compteurs par flux, tx Qonto sans justif **live**). Service launchd + tunnel (Tailscale/Cloudflare).
+- **Retenter** en cascade : Gmail/HTML (flux 6) → **Drive OCR** (flux 3, match par montant) → portail (flux 5).
+  Ambigu → sélection de candidats (aperçu PDF). **Confirmer** attache (idempotence live).
+- **Ignorer** : masque local + deep-link `?highlight=` vers Qonto web (l'API ne permet pas `attachment_required=false`,
+  `PATCH /transactions` → 404). **Ajouter un abonnement** depuis l'UI (email ou portail générique).
+- **Fix santé session** : l'horizon = expiration la plus *lointaine* des cookies valides (l'ancien `min()` mettait
+  tout en rouge à cause des cookies éphémères consent/Cloudflare `__cf_bm`).
+- Constat : **Bouygues** non scrapable (SPA OAuth) ; `fetch_generic.py` pour les portails simples ajoutés via l'UI.
 
 **v1.7 (2026-07-04)** — Flux 7 : recettes (côté crédit)
 - **`reconcile_recettes.py` + `run_recettes.py`** : factures clients ↔ virements créditeurs → attache le
