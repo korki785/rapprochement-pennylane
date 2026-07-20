@@ -280,7 +280,10 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.maisondarwish.saas-w
 
 - Card-SaaS **sans** facture email (Notion, OpenAI, Hostinger, Wix…) : factures sur portail uniquement → hors périmètre (sprint séparé).
 - Balayage = **INBOX** seulement (un justificatif présent uniquement dans « Envoyés » via transfert auto n'est pas lu).
-- **Formats reconnus** : montants `1 156,41` / `1,156.41` (US) / `1.156,41` ; dates FR + EN (`25 April 2026`).
+- **Formats reconnus** : montants `1156,41` / `1 156,41` / `1,156.41` (US) / `1.156,41` (point =
+  milliers) ; dates FR + EN (`25 April 2026`). Les 5 variantes sont générées par
+  `_amount_strings` — celle à **espace** est mise entre **guillemets** dans la requête Gmail
+  (sinon l'espace est lue comme un séparateur de termes et le groupe OR entier tombe à zéro).
 - **Justificatif auto-envoyé** : le marchand est lu DANS le PDF (pas seulement l'expéditeur) → un reçu que tu te transfères à toi-même se rapproche quand même (montant + date + marchand croisé au libellé Qonto).
 - Démarre au **01/04/2026**.
 
@@ -466,6 +469,16 @@ dans `weekly_recap.sh`.
   quand même. La ligne par fournisseur dans `saas_senders.csv` devient **optionnelle**.
 - **Skip SÛR** (jamais de mauvais attach) : montant qui n'est un total nulle part, aucun lien de
   nom, ou ≥2 candidats → laissé non rapproché (repris par les autres flux / manuel).
+- **Justificatif PHOTOGRAPHIÉ** (JPEG, corps du mail vide) : son montant n'existe que dans les
+  PIXELS, donc l'index texte de Gmail ne peut pas le trouver. Un **repli** re-cherche alors sans
+  le montant (jeton marchand + pièce jointe **image** exigés, 6 mails max), télécharge et OCR-ise.
+  La vérification en aval est **inchangée** (montant-total ET nom) → aucun relâchement du garde-fou.
+- **Un virement, PLUSIEURS factures** : un remboursement unique peut couvrir plusieurs
+  justificatifs (Amazon 599,00 + 13,99 = 612,99) ; le montant du virement n'est alors un total
+  nulle part. `totals_sum_to` accepte une **somme de 2 à 3 totaux** du document — réservé aux
+  appelants qui exigent aussi le nom marchand.
+- **Boîte perso NON exclue** : un justificatif qu'on se transfère à soi-même part de l'adresse
+  perso. Seuls nos propres récaps sont écartés, **par sujet** (`[Rapprochement]`).
 
 ---
 
@@ -661,6 +674,40 @@ Accès à distance : tunnel vers le Mac (Tailscale ou Cloudflare) — voir `scri
 ---
 
 ## Historique récent
+
+**v1.9 (2026-07-20)** — Six angles morts SILENCIEUX de la recherche de justificatifs
+
+Tous échouaient en renvoyant « aucun justificatif trouvé » au lieu d'une erreur : un vrai bug
+ressemblait donc à une pièce manquante. Deux d'entre eux ne touchaient **que les montants ≥ 1000**
+— les plus grosses transactions étaient les plus dures à rapprocher.
+
+- **Montant à espace non quoté** (`1 000,00`) : Gmail lit l'espace comme un séparateur de termes
+  → le groupe OR entier s'effondre. Mesuré en direct : **9 résultats sans la variante, 0 avec**.
+  La requête part désormais en **littéral IMAP** (plus de guillemets englobants) → les termes
+  peuvent enfin être quotés. Même correctif dans l'audit hebdo.
+- **Format européen `1.483,30` jamais généré** (point = milliers) alors que le README l'annonçait.
+  La facture Villa Duflot porte « Solde: 1.483,30 € » : trouvée, marchand croisé, reconnue comme
+  facture… et rejetée sur le seul montant.
+- **Justificatifs photographiés jamais téléchargés** : montant seulement dans les pixels →
+  requête `(montant) ET (jeton)` sans réponse → mail jamais récupéré, OCR jamais exécuté.
+  Repli sans montant, restreint aux **images** (le texte d'un PDF est déjà indexé), 6 mails max.
+- **Somme de justificatifs** (`totals_sum_to`) : un virement couvrant 2-3 factures.
+- **Adresse perso ré-incluse** : `_SEARCH_EXCLUDE` masquait tout justificatif auto-transféré ;
+  les récaps sont maintenant écartés **par sujet**.
+- **Réponse Qonto tronquée** : `_request` ne regardait ni le code de retour de curl ni l'absence
+  du marqueur `__STATUS__` → JSON partiel envoyé au parseur (`JSONDecodeError` illisible).
+  Re-tenté, puis erreur explicite. Timeout 30 s → 60 s.
+- **IMAP avalé** : `search_receipt_uids` reconnecte une fois et **journalise bruyamment** au lieu
+  de renvoyer `[]` (indistinguable de « aucun reçu ») — `watch.log` montrait 38
+  `SSL: BAD_WRITE_RETRY` consécutifs abandonnant des transactions en silence.
+- **LIVE** : 612,99 € (Amazon, 2 factures), 1 483,30 € (Villa Duflot) et 871,99 € (1000 USD)
+  rapprochés après avoir été introuvables. 43 tests existants OK, **21 tests de régression**
+  ajoutés (`test_photo_receipt.py`, `test_qonto_truncation.py`).
+- ⚠️ **Constat** : sur 238 transactions sans justificatif de l'exercice, ces correctifs n'en ont
+  débloqué qu'**une** (+1 ambiguë). Les autres n'ont réellement aucun justificatif en boîte mail.
+- ⚠️ **AISO** : un email de notification *Invoice Simple* (lien, **sans PJ**) est rendu en PDF et
+  attaché — c'est la **notification**, pas la facture. Pour la vraie facture : dépôt manuel via
+  `ingest_drop.py`.
 
 **v1.8 (2026-07-07)** — Cockpit (tableau de bord local)
 - **`dashboard.py`** (serveur stdlib, bind 127.0.0.1) + **`dashboard.html`** + **`health.py`** : 3 panneaux

@@ -46,7 +46,7 @@ def load_qonto_credentials() -> tuple[str, str]:
 
 class QontoClient:
     def __init__(self, slug: str, secret_key: str, base_url: str = DEFAULT_BASE_URL,
-                 timeout: float = 30.0):
+                 timeout: float = 60.0):     # 30 s coupait des pages de 100 transactions
         self._auth = f"{slug}:{secret_key}"
         self._base = base_url.rstrip("/")
         self._timeout = int(timeout)
@@ -85,6 +85,7 @@ class QontoClient:
 
             output = result.stdout
             status = 200
+            truncated = False
             if "\n__STATUS__" in output:
                 body_part, status_part = output.rsplit("\n__STATUS__", 1)
                 try:
@@ -93,14 +94,36 @@ class QontoClient:
                     pass
                 output = body_part
             else:
-                output = output
+                # Le marqueur de fin manque => curl est mort AVANT d'écrire la fin (timeout
+                # `--max-time`, connexion coupée) : le corps est TRONQUÉ. Sans ce test, le JSON
+                # partiel partait au parseur et remontait en `JSONDecodeError` illisible au lieu
+                # d'être re-tenté (constaté 2026-07-20 : « Unterminated string ... char 61805 »).
+                truncated = True
+
+            if (truncated or result.returncode != 0) and attempt < _MAX_RETRIES - 1:
+                time.sleep(min(2 ** attempt, 10))
+                continue
+            if truncated or result.returncode != 0:
+                raise QontoError(
+                    f"{method} {url} : réponse TRONQUÉE (curl code {result.returncode}, "
+                    f"{len(output)} octets reçus). Réseau lent ou timeout "
+                    f"({self._timeout}s) — relancer, ou augmenter `timeout=`.")
 
             if status in _RETRY_STATUSES and attempt < _MAX_RETRIES - 1:
                 time.sleep(min(2 ** attempt, 10))
                 continue
             if status >= 400:
                 raise QontoError(f"{method} {url} -> HTTP {status}: {output[:500]}")
-            return json.loads(output) if output.strip() else {}
+            try:
+                return json.loads(output) if output.strip() else {}
+            except json.JSONDecodeError as exc:
+                # Corps complet selon curl mais illisible : re-tenter plutôt que planter.
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(min(2 ** attempt, 10))
+                    continue
+                raise QontoError(
+                    f"{method} {url} : réponse JSON illisible ({exc}). "
+                    f"Début : {output[:200]}") from exc
         raise QontoError(f"{method} {url} a échoué après {_MAX_RETRIES} tentatives")
 
     def get(self, url: str) -> Dict:
@@ -267,6 +290,10 @@ class QontoClient:
                     "local_currency": tx.get("local_currency") or "",
                     "settled_at": settled,
                     "operation_type": op,
+                    # Sources de nom marchand hors libellé (cf. normalize.tx_merchant_tokens) :
+                    # le motif du virement et le nom nettoyé par Qonto.
+                    "reference": str(tx.get("reference") or ""),
+                    "clean_counterparty_name": str(tx.get("clean_counterparty_name") or ""),
                     "attachment_required": bool(tx.get("attachment_required")),
                     "attachment_ids": tx.get("attachment_ids") or [],
                 })

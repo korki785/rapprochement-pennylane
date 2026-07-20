@@ -38,6 +38,11 @@ DEFAULT_SINCE = "2026-04-01"
 IMAP_HOST = "imap.gmail.com"
 IMAP_PORT = 993
 MAX_PDF_BYTES = 4_000_000  # ignore les gros PDF (riders/design) — les factures sont petites
+# Photos de reçus (justificatif pris en photo) : converties en PDF puis OCR-isées comme un
+# scan. Sans ça, un reçu envoyé en JPEG est invisible pour tout le pipeline.
+IMAGE_TYPES = ("image/jpeg", "image/jpg", "image/png", "image/heic", "image/heif")
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".heic", ".heif")
+MAX_IMAGE_BYTES = 20_000_000  # une photo de téléphone dépasse largement MAX_PDF_BYTES
 
 
 def load_credentials() -> Tuple[str, str]:
@@ -123,6 +128,59 @@ def _safe_pdf_name(name: str) -> str:
     return keep if keep.lower().endswith(".pdf") else keep + ".pdf"
 
 
+def _ocr_sidecar(src_image: Path, dest_pdf: Path) -> None:
+    """OCR-ise l'image D'ORIGINE et écrit le cache texte du PDF converti.
+
+    CRITIQUE : ne pas laisser l'OCR passer par le PDF. `_ocr_pdf` re-rastérise à 200 dpi, ce qui
+    détruit la colonne de prix d'une photo de reçu (ticket La Pause 4032 px : « 247.50 » lisible
+    en natif, absent après re-rastérisation) — le montant disparaît et le rapprochement échoue.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from reconcile_fournisseurs import _cache_path, _ensure_ocr_bin
+        import subprocess
+
+        binp = _ensure_ocr_bin()
+        if not binp:
+            return
+        r = subprocess.run([binp, str(src_image)], capture_output=True, text=True, timeout=120)
+        txt = r.stdout or ""
+        if not txt.strip():
+            return
+        cache = _cache_path(dest_pdf)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(txt, encoding="utf-8")
+    except Exception:
+        pass  # sans OCR, le PDF reste attachable — seul le rapprochement auto est perdu
+
+
+def _image_to_pdf(payload: bytes, suffix: str, dest: Path) -> bool:
+    """Convertit une image en PDF via `sips` (macOS). True si le PDF est écrit.
+
+    Le reste du pipeline est PDF-centrique (`_pdftotext` + repli OCR Vision, `upload_attachment`) :
+    convertir en amont évite de dupliquer ce chemin pour les images.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    sips = shutil.which("sips") or "/usr/bin/sips"
+    if not Path(sips).exists():
+        return False
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / f"img{suffix or '.jpg'}"
+        src.write_bytes(payload)
+        try:
+            subprocess.run([sips, "-s", "format", "pdf", str(src), "--out", str(dest)],
+                           check=True, capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if not (dest.exists() and dest.stat().st_size > 500):
+            return False
+        _ocr_sidecar(src, dest)
+    return True
+
+
 def fetch_message(mail: imaplib.IMAP4_SSL, uid: bytes) -> Optional[email.message.Message]:
     _, data = mail.uid("fetch", uid, "(RFC822)")
     if not data or not data[0]:
@@ -146,16 +204,25 @@ def extract_pdfs(msg: email.message.Message, out_dir: Path, msgid: str) -> List[
             continue
         filename = _decode(part.get_filename() or "")
         ctype = (part.get_content_type() or "").lower()
-        if ctype != "application/pdf" and not filename.lower().endswith(".pdf"):
+        low = filename.lower()
+        is_pdf = ctype == "application/pdf" or low.endswith(".pdf")
+        is_image = ctype in IMAGE_TYPES or low.endswith(IMAGE_EXTS)
+        if not is_pdf and not is_image:
             continue
         payload = part.get_payload(decode=True)
-        if not payload or len(payload) < 500 or len(payload) > MAX_PDF_BYTES:
+        cap = MAX_PDF_BYTES if is_pdf else MAX_IMAGE_BYTES
+        if not payload or len(payload) < 500 or len(payload) > cap:
             continue
         dest = out_dir / _safe_pdf_name(filename)
         if dest.exists():
             tag = "".join(c for c in msgid if c.isalnum())[:8] or "x"
             dest = out_dir / f"{tag}_{dest.name}"
-        dest.write_bytes(payload)
+        if is_pdf:
+            dest.write_bytes(payload)
+        else:
+            suffix = next((e for e in IMAGE_EXTS if low.endswith(e)), ".jpg")
+            if not _image_to_pdf(payload, suffix, dest):
+                continue
         paths.append(dest)
     return paths
 

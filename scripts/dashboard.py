@@ -155,9 +155,9 @@ def retry_tx(tx: dict) -> dict:
         return retry_portal(tx, vendor)
 
     import reconcile_qonto as rq
-    from recon.normalize import label_merchant_tokens
+    from recon.normalize import tx_merchant_tokens
 
-    tokens = label_merchant_tokens(tx.get("label", ""))
+    tokens = tx_merchant_tokens(tx)
     if not tokens:
         return {"status": "no_token", "detail": "aucun jeton marchand dans le libellé"}
     boxes = rq._connect_boxes()
@@ -166,11 +166,8 @@ def retry_tx(tx: dict) -> dict:
     try:
         cands = rq.collect_verified_receipts(tx, boxes, tokens)
     finally:
-        for mail, _ in boxes:
-            try:
-                mail.logout()
-            except Exception:
-                pass
+        for box in boxes:
+            box.logout()
 
     if cands:
         n_emails = len({c["msgid"] for c in cands})
@@ -516,9 +513,15 @@ def build_unreconciled() -> dict:
     for tx in rows:
         if not (tx.get("attachment_required") and not tx.get("attachment_ids")):
             continue
+        # La ligne est renvoyée telle quelle à /api/retry : elle doit porter les champs dont
+        # dépend la recherche (devise d'origine + sources de nom marchand hors libellé).
         row = {"id": tx["id"], "label": tx["label"], "amount": tx["amount"],
                "currency": tx["currency"], "date": tx["settled_at"],
-               "operation_type": tx["operation_type"]}
+               "operation_type": tx["operation_type"],
+               "local_amount": tx.get("local_amount"),
+               "local_currency": tx.get("local_currency") or "",
+               "reference": tx.get("reference") or "",
+               "clean_counterparty_name": tx.get("clean_counterparty_name") or ""}
         (hidden if tx["id"] in ignored else items).append(row)
     return {"live": True, "items": items, "hidden": hidden,
             "ignored": list(ignored.keys()), "count": len(items)}

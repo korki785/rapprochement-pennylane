@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import imaplib
+import itertools
 import json
 import os
 import re
@@ -51,8 +52,16 @@ GMAIL_BOXES = [
     ("LOVABLE_GMAIL", "LOVABLE_GMAIL_APP_PASSWORD", "parishouse"),
 ]
 # Expéditeurs à IGNORER dans la recherche email (ne sont pas des justificatifs) :
-# Qonto (notifications « virement exécuté » qui répètent le montant) + nos propres récaps.
-_SEARCH_EXCLUDE = ["qonto.com", "naelkodmani@gmail.com"]
+# Qonto (notifications « virement exécuté » qui répètent le montant).
+#
+# NE PAS exclure ici une adresse PERSONNELLE : un justificatif que l'on se transfère à
+# soi-même part de cette adresse. Exclure `naelkodmani@gmail.com` masquait TOUT reçu
+# auto-transféré depuis la boîte perso (constaté 2026-07-20). Nos propres récaps sont
+# écartés par le SUJET (`_SEARCH_EXCLUDE_SUBJECT`), pas par l'expéditeur.
+_SEARCH_EXCLUDE = ["qonto.com"]
+# Sujets à IGNORER : nos propres emails de récap/relance, qui répètent les montants et
+# se feraient passer pour des justificatifs.
+_SEARCH_EXCLUDE_SUBJECT = ["[Rapprochement]"]
 
 
 # --------------------------------------------------------------------------- #
@@ -119,8 +128,13 @@ def _amount_strings(targets: list) -> list:
         if len(intp) > 3:
             us = f"{int(intp):,}.{dec}"                       # 1,156.41
             fr = us.replace(",", " ").replace(".", ",")       # 1 156,41
+            # Format européen : POINT comme séparateur de milliers, VIRGULE décimale
+            # (« 1.483,30 »). Manquait alors que le README l'annonçait : la facture Villa
+            # Duflot écrit « Solde: 1.483,30 € » et n'était donc jamais rapprochée.
+            eu = us.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
             out.append(us)
             out.append(fr)
+            out.append(eu)
     return list(dict.fromkeys(out))
 
 
@@ -143,11 +157,42 @@ _NET_KW = (r"(?:factur[ée]|reste\s*[àa]?\s*(?:payer|r[ée]gler)|solde\s*[àa]?
 _CUR = r"(?:[€$£]|\bEUR\b|\bUSD\b|\bGBP\b)"
 
 
-def _pdf_has_total(txt: str, amt_strs: list, gap: int = 75) -> bool:
+def _flatten_ocr(txt: str) -> str:
+    """Ré-assemble un OCR « une cellule par ligne » en une ligne. "" si le texte n'est pas ainsi.
+
+    Vision OCR-ise une PHOTO de ticket en lisant colonne par colonne : « TOTAL » et « 247.50 »
+    atterrissent 13 lignes l'un de l'autre alors qu'ils sont côte à côte sur le papier. Toutes
+    les regexes de `_pdf_has_total` étant ancrées sur la ligne (`[^\\n]{0,gap}`), elles ne
+    peuvent structurellement pas matcher. On aplatit pour retrouver la proximité, la logique de
+    `gap` (et l'exigence du nom marchand côté appelant) restant inchangée.
+    """
+    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    if len(lines) < 10:
+        return ""
+    short = sum(1 for ln in lines if len(ln) <= 25)
+    if short < 0.6 * len(lines):        # mise en page normale : ne pas toucher
+        return ""
+    return " ".join(lines)
+
+
+def _pdf_has_total(txt: str, amt_strs: list, gap: int = 75, allow_bare_total: bool = False) -> bool:
     """`gap` = largeur max (caractères, même ligne) entre le mot-clé « total/payé… » et le
     montant. 75 par défaut (audit strict) ; le rapprochement piloté-transaction passe plus large
     (montant souvent en colonne, loin du label — ex. reçu Uber « Total …90 espaces… 15,04 € »),
-    car il exige EN PLUS le nom marchand (double garde -> pas de faux positif)."""
+    car il exige EN PLUS le nom marchand (double garde -> pas de faux positif).
+
+    `allow_bare_total` : accepte un montant SANS symbole de devise adossé au simple mot « total »
+    (ticket de caisse thermique : « TOTAL … 247.50 », pas de €). RÉSERVÉ aux appelants qui
+    exigent par ailleurs le nom marchand — l'audit strict ne doit PAS l'activer, sinon un
+    sous-total qui coïncide déclarerait à tort une transaction justifiée.
+    """
+    if _has_total_in(txt, amt_strs, gap, allow_bare_total):
+        return True
+    flat = _flatten_ocr(txt)            # repli photo de ticket (OCR fragmenté)
+    return bool(flat) and _has_total_in(flat, amt_strs, gap, allow_bare_total)
+
+
+def _has_total_in(txt: str, amt_strs: list, gap: int, allow_bare_total: bool = False) -> bool:
     for s in amt_strs:
         esc = re.escape(s)
         # Devise (symbole ou code ISO) AVANT (« €35.99 ») OU APRÈS (« 35.99 € / 35.99 EUR »).
@@ -161,6 +206,64 @@ def _pdf_has_total(txt: str, amt_strs: list, gap: int = 75) -> bool:
         amt_only = r"(?<![\d.,])" + esc + r"(?![\d.,])"
         if re.search(_NET_KW + r"[^\n]{0,40}" + amt_only, txt, re.IGNORECASE):
             return True
+        if allow_bare_total and re.search(
+                _TOTAL_KW + r"[^\n]{0," + str(gap) + r"}" + amt_only, txt, re.IGNORECASE):
+            return True
+    return False
+
+
+def _parse_amount(raw: str) -> float:
+    """« 1 156,41 » / « 1,156.41 » / « 599,00 » -> float. NaN-safe : renvoie -1 si illisible."""
+    s = raw.strip().replace(" ", "").replace(" ", "").replace(" ", "")
+    if "," in s and "." in s:                       # le SÉPARATEUR DÉCIMAL est le dernier vu
+        s = s.replace(",", "") if s.rfind(".") > s.rfind(",") else s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        s = s.replace(",", ".") if len(s.split(",")[-1]) == 2 else s.replace(",", "")
+    try:
+        return round(float(s), 2)
+    except ValueError:
+        return -1.0
+
+
+def _document_totals(txt: str, gap: int = 75) -> list:
+    """Tous les montants du document adossés à un mot-clé de total (dédupliqués, > 0)."""
+    pat = re.compile(
+        _TOTAL_KW + r"[^\n]{0," + str(gap) + r"}?(?:" + _CUR + r"\s*)?(\d[\d  .,]{0,12}\d)"
+        r"(?:\s*" + _CUR + r")?", re.IGNORECASE)
+    out = []
+    for src in (txt, _flatten_ocr(txt)):
+        if not src:
+            continue
+        for m in pat.finditer(src):
+            v = _parse_amount(m.group(1))
+            if v > 0:
+                out.append(v)
+    return list(dict.fromkeys(out))
+
+
+# Nombre max de justificatifs qu'un seul virement peut regrouper (2 factures Amazon -> 1
+# remboursement). Au-delà, le risque de somme fortuite dépasse le gain.
+MAX_SUM_PARTS = 3
+
+
+def totals_sum_to(txt: str, targets: list, tol: float = 0.02, gap: int = 75) -> bool:
+    """True si 2..MAX_SUM_PARTS totaux DISTINCTS du document somment à un montant cible.
+
+    Cas réel : un remboursement Qonto unique (612,99 €) couvre DEUX factures Amazon
+    (599,00 € + 13,99 €) réunies dans le même PDF — 612,99 n'apparaît alors nulle part
+    comme total, et `_pdf_has_total` échoue légitimement.
+
+    Réservé aux appelants qui exigent PAR AILLEURS le nom marchand (double garde) : une
+    somme fortuite reste possible, le croisement de nom la neutralise.
+    """
+    vals = _document_totals(txt, gap=gap)
+    if len(vals) < 2:
+        return False
+    for target in targets:
+        for n in range(2, MAX_SUM_PARTS + 1):
+            for combo in itertools.combinations(vals, n):
+                if abs(sum(combo) - float(target)) <= tol:
+                    return True
     return False
 
 
@@ -211,20 +314,25 @@ def _gmail_search_box(env_user: str, env_pass: str, targets: list,
     if not amt_terms:
         return 0
     excl = " ".join(f"-from:{d}" for d in _SEARCH_EXCLUDE)
+    excl += " " + " ".join(f"-subject:{s}" for s in _SEARCH_EXCLUDE_SUBJECT)
     # Le SUJET doit ressembler à un justificatif (un vrai reçu/facture le porte en objet) ET
     # le montant mentionné — sinon un mail quelconque qui cite le nombre = faux SUSPECT
     # (bruit à l'échelle de l'exercice ; « total/payment » dans le corps = trop courant).
     # Le PDF local reste, lui, un signal fort sans ce filtre.
     kw = ("subject:(recu OR receipt OR facture OR invoice OR commande OR order OR "
           "reservation OR confirmation OR payment)")
-    q = f'({" OR ".join(amt_terms)}) {kw} {excl} after:{d_from} before:{d_to}'
+    # `_q` : un montant au format français à espace (« 1 000,00 ») DOIT être entre guillemets,
+    # sinon Gmail lit l'espace comme un séparateur et le groupe OR entier tombe à zéro —
+    # tout montant ≥ 1000 devenait introuvable, sans erreur (cf. reconcile_qonto._q).
+    from reconcile_qonto import _q, _uid_search_raw          # scripts/ déjà sur sys.path
+    q = f'({" OR ".join(_q(a) for a in amt_terms)}) {kw} {excl} after:{d_from} before:{d_to}'
     try:
         m = imaplib.IMAP4_SSL("imap.gmail.com", 993)
         m.login(user, pwd)
         m.select("inbox")
-        typ, data = m.uid("search", None, "X-GM-RAW", f'"{q}"')
+        uids = _uid_search_raw(m, q)
         m.logout()
-        return len(data[0].split()) if (typ == "OK" and data and data[0]) else 0
+        return len(uids)
     except Exception as exc:
         print(f"    (recherche Gmail {env_user} échouée : {exc})", file=sys.stderr)
         return 0

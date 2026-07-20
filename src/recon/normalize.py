@@ -44,6 +44,13 @@ _PROCESSOR_PREFIXES = {
 }
 # Jetons génériques à écarter d'un nom de marchand (en plus de `saas._SENDER_STOP`).
 _MERCHANT_STOP = {"PENDING", "HTTP", "HTTPS", "WWW", "HELP", "BILL", "APP"}
+# Mots de motif d'un virement (« Remboursement commande Amazon ») : pas des marchands.
+_REFERENCE_STOP = {
+    "REMBOURSEMENT", "REMBOURSEMENTS", "COMMANDE", "COMMANDES", "NOTE", "NOTES",
+    "FRAIS", "FACTURE", "FACTURES", "PAIEMENT", "PAIEMENTS", "VIREMENT", "VIREMENTS",
+    "AVANCE", "ACHAT", "ACHATS", "REFUND", "REIMBURSEMENT", "ORDER", "EXPENSE",
+    "EXPENSES", "INVOICE", "PAYMENT", "POUR", "AVEC", "DIVERS",
+}
 
 # Motifs purgés du libellé avant tokenisation.
 _DATE_RE = re.compile(r"\b\d{1,4}[-/.]\d{1,2}([-/.]\d{1,4})?\b")  # 12/03, 2025-01-04
@@ -100,6 +107,22 @@ def label_merchant_tokens(label: str, min_len: int = 3) -> List[str]:
     stop = _SENDER_STOP | _MERCHANT_STOP
     kept = [t for t in tokens if len(t) >= min_len and t not in stop]
     return list(dict.fromkeys(kept))                     # dédup en préservant l'ordre
+
+
+def tx_merchant_tokens(tx: dict, min_len: int = 3) -> List[str]:
+    """Jetons marchands d'une transaction : libellé + `reference` + `clean_counterparty_name`.
+
+    Le libellé seul ne suffit pas. Sur un remboursement au dirigeant, il vaut « Nael Darwish »
+    et le VRAI marchand n'est que dans `reference` (« Remboursement commande Amazon » -> AMAZON).
+    Sur une carte, `clean_counterparty_name` complète un libellé tronqué par la banque
+    (« LA PAUSE » -> « La Pause Plaisir »). Les mots de motif (remboursement, commande…) sont
+    écartés : ce ne sont pas des noms de marchand.
+    """
+    tokens = label_merchant_tokens(tx.get("label", ""), min_len=min_len)
+    for field in ("clean_counterparty_name", "reference"):
+        extra = label_merchant_tokens(str(tx.get(field) or ""), min_len=min_len)
+        tokens += [t for t in extra if t not in _REFERENCE_STOP]
+    return list(dict.fromkeys(tokens))
 
 
 def _token_sort(text: str) -> str:
